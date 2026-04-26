@@ -96,6 +96,7 @@ public sealed class VirtualDevice : IAsyncDisposable
             }
         };
 
+        _adapter.UdpPort = udpPort;
         await _adapter.ListenAsync(BoundAddress, tcpPort, ct);
 
         var udpEndpoint = new IPEndPoint(BoundAddress, udpPort);
@@ -103,6 +104,25 @@ public sealed class VirtualDevice : IAsyncDisposable
             ? _udpFactory(udpEndpoint)
             : new EipUdpTransport(udpEndpoint);
         _udpTransport.DataReceived += OnUdpDataReceived;
+
+        // Update connection RemoteEndpoint from actual UDP sender (handles ephemeral ports)
+        if (_udpTransport is EipUdpTransport realUdp)
+        {
+            realUdp.DataReceivedWithSender += (connId, senderEp) =>
+            {
+                var conn = ConnectionManager.FindByOtoTId(connId);
+                if (conn != null && conn.State == Connections.ConnectionState.Established)
+                {
+                    // Update to actual sender endpoint (may differ from default port 2222)
+                    if (conn.RemoteEndpoint == null ||
+                        conn.RemoteEndpoint.Port != senderEp.Port)
+                    {
+                        conn.RemoteEndpoint = senderEp;
+                    }
+                }
+            };
+        }
+
         await _udpTransport.StartAsync(ct);
     }
 

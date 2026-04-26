@@ -22,6 +22,9 @@ public sealed class EipAdapter : IAsyncDisposable
 
     public int Port { get; private set; }
 
+    /// <summary>The UDP port this adapter's device listens on for I/O data. Set by VirtualDevice.</summary>
+    public int UdpPort { get; set; } = EipUdpTransport.IoPort;
+
     /// <summary>
     /// Called when a new connection is established via Forward Open.
     /// The adapter sets the remote endpoint (PLC IP + UDP port) on the connection object
@@ -236,15 +239,15 @@ public sealed class EipAdapter : IAsyncDisposable
         if (cipResponse.Status.IsSuccess &&
             (serviceCode == 0x54 || serviceCode == 0x5B))
         {
-            // Sockaddr Info O→T (0x8000): tells PLC where to send O→T data (our UDP port)
-            var sockOtoT = BuildSockaddrInfo(localEp.Address, EipUdpTransport.IoPort);
+            // Sockaddr Info O→T (0x8000): tells scanner where to send O→T data (our UDP port)
+            var sockOtoT = BuildSockaddrInfo(localEp.Address, UdpPort);
             replyItemsList.Add(new CpfItem { TypeId = CpfItemType.SockaddrInfoOtoT, Data = sockOtoT });
 
-            // Sockaddr Info T→O (0x8001): tells PLC where we'll send T→O data (PLC's UDP port)
-            var sockTtoO = BuildSockaddrInfo(IPAddress.Any, EipUdpTransport.IoPort);
+            // Sockaddr Info T→O (0x8001): where we'll send T→O data
+            var sockTtoO = BuildSockaddrInfo(IPAddress.Any, UdpPort);
             replyItemsList.Add(new CpfItem { TypeId = CpfItemType.SockaddrInfoTtoO, Data = sockTtoO });
 
-            // Set RemoteEndpoint on the connection so T→O production knows where to send
+            // Set RemoteEndpoint — assume scanner listens on the standard port
             var plcUdpEndpoint = new IPEndPoint(remoteEp.Address, EipUdpTransport.IoPort);
             ConnectionOpened?.Invoke(cipResponse, plcUdpEndpoint);
         }

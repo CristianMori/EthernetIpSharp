@@ -17,8 +17,11 @@ public sealed class EipUdpTransport : IEipUdpTransport
     private UdpClient? _client;
     private CancellationTokenSource? _cts;
 
-    /// <summary>Called when I/O data arrives. Parameters: connectionId, data (class 1 has seq count stripped).</summary>
+    /// <summary>Called when I/O data arrives. Parameters: connectionId, data.</summary>
     public event Action<uint, ReadOnlyMemory<byte>>? DataReceived;
+
+    /// <summary>Called with sender endpoint when I/O data arrives. Parameters: connectionId, senderEndpoint.</summary>
+    public event Action<uint, IPEndPoint>? DataReceivedWithSender;
 
     public EipUdpTransport(IPEndPoint bindEndpoint)
     {
@@ -79,6 +82,7 @@ public sealed class EipUdpTransport : IEipUdpTransport
         var ioData = data.AsMemory(offset, dataLength);
 
         DataReceived?.Invoke(connectionId, ioData);
+        DataReceivedWithSender?.Invoke(connectionId, remoteEndpoint);
     }
 
     /// <summary>
