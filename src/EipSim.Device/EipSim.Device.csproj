@@ -1,0 +1,15 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\EipSim.Cip\EipSim.Cip.csproj" />
+    <ProjectReference Include="..\EipSim.Protocol\EipSim.Protocol.csproj" />
+    <ProjectReference Include="..\EipSim.Connections\EipSim.Connections.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

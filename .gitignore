@@ -1,0 +1,8 @@
+bin/
+obj/
+*.suo
+*.user
+*.vs/
+.vs/
+*.DotSettings.user
+/tools/ParsePcap/
