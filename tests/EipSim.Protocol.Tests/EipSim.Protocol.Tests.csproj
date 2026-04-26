@@ -24,6 +24,7 @@
     <ProjectReference Include="..\..\src\EipSim.Cip\EipSim.Cip.csproj" />
     <ProjectReference Include="..\..\src\EipSim.Device\EipSim.Device.csproj" />
     <ProjectReference Include="..\..\src\EipSim.Connections\EipSim.Connections.csproj" />
+    <ProjectReference Include="..\..\src\EipSim.Logix\EipSim.Logix.csproj" />
   </ItemGroup>
 
 </Project>
