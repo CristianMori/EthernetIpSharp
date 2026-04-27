@@ -106,22 +106,18 @@ public sealed class VirtualDevice : IAsyncDisposable
         _udpTransport.DataReceived += OnUdpDataReceived;
 
         // Update connection RemoteEndpoint from actual UDP sender (handles ephemeral ports)
-        if (_udpTransport is EipUdpTransport realUdp)
+        _udpTransport.DataReceivedWithSender += (connId, senderEp) =>
         {
-            realUdp.DataReceivedWithSender += (connId, senderEp) =>
+            var conn = ConnectionManager.FindByOtoTId(connId);
+            if (conn != null && conn.State == Connections.ConnectionState.Established)
             {
-                var conn = ConnectionManager.FindByOtoTId(connId);
-                if (conn != null && conn.State == Connections.ConnectionState.Established)
+                if (conn.RemoteEndpoint == null ||
+                    conn.RemoteEndpoint.Port != senderEp.Port)
                 {
-                    // Update to actual sender endpoint (may differ from default port 2222)
-                    if (conn.RemoteEndpoint == null ||
-                        conn.RemoteEndpoint.Port != senderEp.Port)
-                    {
-                        conn.RemoteEndpoint = senderEp;
-                    }
+                    conn.RemoteEndpoint = senderEp;
                 }
-            };
-        }
+            }
+        };
 
         await _udpTransport.StartAsync(ct);
     }
