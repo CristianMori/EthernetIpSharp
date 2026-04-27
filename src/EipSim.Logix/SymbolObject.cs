@@ -11,13 +11,21 @@ namespace EipSim.Logix;
 /// </summary>
 public sealed class SymbolObject
 {
+    /// <summary>CIP class code for Symbol Object.</summary>
     public const uint ClassCode = 0x6B;
+
+    /// <summary>Service code for Get_Instance_Attribute_List.</summary>
     public const byte GetInstanceAttributeList = 0x55;
 
     private readonly ITagDatabase _tags;
 
+    /// <summary>The CIP class object for registration in the dispatcher.</summary>
     public CipClass CipClass { get; }
 
+    /// <summary>
+    /// Create the Symbol Object CIP class with Read/Write Tag instance services
+    /// and Get_Instance_Attribute_List class service for tag browsing.
+    /// </summary>
     public SymbolObject(ITagDatabase tags)
     {
         _tags = tags;
@@ -64,6 +72,7 @@ public sealed class SymbolObject
             AttributeAccess.GetSingle | AttributeAccess.GetAll, tag.SymbolType));
     }
 
+    /// <summary>Resolve a Tag from a CIP instance — tries UserData first, falls back to database lookup.</summary>
     private Tag? GetTagFromInstance(CipInstance instance) =>
         instance.UserData as Tag ?? _tags.FindByInstanceId(instance.InstanceId);
 

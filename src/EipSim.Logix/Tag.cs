@@ -86,9 +86,6 @@ public sealed class Tag
         ValueChanged?.Invoke(this, new TagChangeInfo(byteOffset, len));
     }
 
-    /// <summary>Get the underlying buffer for direct use by service handlers.</summary>
-    internal byte[] GetRawBuffer() => _data;
-
     public override string ToString() => $"{Name} ({ElementCount}x{ElementSize}B, type=0x{TagType:X4})";
 }
 

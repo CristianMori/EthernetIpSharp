@@ -12,12 +12,18 @@ namespace EipSim.Logix;
 /// </summary>
 public sealed class TemplateObject
 {
+    /// <summary>CIP class code for Template Object.</summary>
     public const uint ClassCode = 0x6C;
 
     private readonly ITagDatabase _tags;
 
+    /// <summary>The CIP class object for registration in the dispatcher.</summary>
     public CipClass CipClass { get; }
 
+    /// <summary>
+    /// Create the Template Object CIP class with Get_Attribute_List (0x03)
+    /// and Template Read (0x4C) instance services.
+    /// </summary>
     public TemplateObject(ITagDatabase tags)
     {
         _tags = tags;

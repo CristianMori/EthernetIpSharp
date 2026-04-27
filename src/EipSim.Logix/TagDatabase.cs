@@ -149,11 +149,19 @@ public sealed class TagDatabase : ITagDatabase
     public IEnumerable<TemplateDefinition> AllTemplates => _templates.Values;
 }
 
-/// <summary>Member definition for TagDatabase.AddTemplate().</summary>
+/// <summary>
+/// Member definition for TagDatabase.AddTemplate().
+/// Describes a member before offset calculation — just name, type, and optional array size.
+/// </summary>
 public readonly struct TemplateMember
 {
+    /// <summary>Member name.</summary>
     public string Name { get; }
+
+    /// <summary>CIP data type code (e.g. LogixDataTypes.DINT).</summary>
     public ushort DataType { get; }
+
+    /// <summary>Array size (0 for scalar members).</summary>
     public int ArraySize { get; }
 
     public TemplateMember(string name, ushort dataType, int arraySize = 0)
@@ -164,13 +172,25 @@ public readonly struct TemplateMember
     }
 }
 
-/// <summary>Resolved template member with computed offset.</summary>
+/// <summary>
+/// Resolved template member with computed byte offset within the structure.
+/// Produced by TagDatabase.AddTemplate() after alignment calculation.
+/// </summary>
 public readonly struct TemplateMemberInfo
 {
+    /// <summary>Member name.</summary>
     public string Name { get; }
+
+    /// <summary>CIP data type code.</summary>
     public ushort DataType { get; }
+
+    /// <summary>Byte offset of this member within the structure data.</summary>
     public int Offset { get; }
+
+    /// <summary>Array size (0 for scalar members).</summary>
     public int ArraySize { get; }
+
+    /// <summary>Size of one element in bytes.</summary>
     public int ElementSize { get; }
 
     public TemplateMemberInfo(string name, ushort dataType, int offset, int arraySize, int elementSize)
@@ -183,17 +203,31 @@ public readonly struct TemplateMemberInfo
     }
 }
 
-/// <summary>A structure template definition (CIP Template Object instance).</summary>
+/// <summary>
+/// A structure template definition corresponding to a CIP Template Object instance (class 0x6C).
+/// Describes the layout and members of a user-defined data type (UDT).
+/// </summary>
 public sealed class TemplateDefinition
 {
+    /// <summary>Template Object instance ID.</summary>
     public ushort InstanceId { get; }
+
+    /// <summary>Template/UDT name.</summary>
     public string Name { get; }
+
+    /// <summary>Structure handle used as the tag type parameter in Read/Write Tag services.</summary>
     public ushort StructureHandle { get; }
+
+    /// <summary>Total structure size in bytes when transmitted on the wire.</summary>
     public uint StructureSize { get; }
+
+    /// <summary>Resolved member definitions with offsets.</summary>
     public IReadOnlyList<TemplateMemberInfo> Members { get; }
+
+    /// <summary>Number of members in this structure.</summary>
     public int MemberCount => Members.Count;
 
-    /// <summary>Template Object Definition Size in 32-bit words.</summary>
+    /// <summary>Template Object Definition Size in 32-bit words (used by Template Read service).</summary>
     public uint DefinitionSize { get; }
 
     public TemplateDefinition(ushort instanceId, string name, ushort structureHandle,
