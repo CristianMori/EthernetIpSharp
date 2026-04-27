@@ -24,7 +24,6 @@ public readonly struct CipPath
     // Segment type constants
     private const byte SegmentTypeMask = 0xE0;
     private const byte LogicalSegment = 0x20;
-    private const byte DataSegment = 0x80;
     private const byte SymbolicSegmentByte = 0x91; // ANSI Extended Symbolic
 
     // Logical segment type (bits 4-2)

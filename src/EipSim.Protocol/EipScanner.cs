@@ -83,23 +83,14 @@ public sealed class EipScanner : IAsyncDisposable
         {
             if (item.TypeId == CpfItemType.UnconnectedData)
             {
-                var mrResp = item.Data.ToArray();
-                byte replySvc = mrResp[0];
-                byte generalStatus = mrResp[2];
-                byte addStatusSize = mrResp[3];
-
-                var addStatus = new ushort[addStatusSize];
-                for (int i = 0; i < addStatusSize; i++)
-                    addStatus[i] = BinaryPrimitives.ReadUInt16LittleEndian(mrResp.AsSpan(4 + i * 2));
-
-                int dataOffset = 4 + addStatusSize * 2;
-                var data = mrResp.AsMemory(dataOffset);
+                if (!MrCodec.TryParseResponse(item.Data, out var replySvc, out var status, out var respData))
+                    throw new InvalidOperationException("Malformed MR response");
 
                 return new CipServiceResponse
                 {
                     ServiceCode = replySvc,
-                    Status = new CipStatus { GeneralStatus = generalStatus, AdditionalStatus = addStatus },
-                    Data = data,
+                    Status = status,
+                    Data = respData,
                 };
             }
         }
@@ -230,20 +221,14 @@ public sealed class EipScanner : IAsyncDisposable
         {
             if (item.TypeId == CpfItemType.UnconnectedData)
             {
-                var mrResp = item.Data.ToArray();
-                byte replySvc = mrResp[0];
-                byte generalStatus = mrResp[2];
-                byte addStatusSize = mrResp[3];
-                var addStatus = new ushort[addStatusSize];
-                for (int i = 0; i < addStatusSize; i++)
-                    addStatus[i] = BinaryPrimitives.ReadUInt16LittleEndian(mrResp.AsSpan(4 + i * 2));
-                int dataOffset = 4 + addStatusSize * 2;
+                if (!MrCodec.TryParseResponse(item.Data, out var replySvc, out var status, out var respData))
+                    throw new InvalidOperationException("Malformed MR response");
 
                 response = new CipServiceResponse
                 {
                     ServiceCode = replySvc,
-                    Status = new CipStatus { GeneralStatus = generalStatus, AdditionalStatus = addStatus },
-                    Data = mrResp.AsMemory(dataOffset),
+                    Status = status,
+                    Data = respData,
                 };
             }
         }
@@ -334,9 +319,9 @@ public sealed class EipScanner : IAsyncDisposable
             await ReadExactAsync(_stream, respHeaderBuf, ct);
             _lastResponseHeader = EncapsulationHeader.Parse(respHeaderBuf);
 
-            if (_lastResponseHeader.Status != 0)
+            if (_lastResponseHeader.Status != EncapsulationStatus.Success)
                 throw new InvalidOperationException(
-                    $"Encapsulation error: command={command}, status=0x{_lastResponseHeader.Status:X8}");
+                    $"Encapsulation error: command={command}, status={_lastResponseHeader.Status}");
 
             // Read response payload
             byte[] respPayload = [];

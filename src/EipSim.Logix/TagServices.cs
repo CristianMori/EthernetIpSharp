@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Buffers.Binary;
 using EipSim.Cip;
 
@@ -7,6 +8,7 @@ namespace EipSim.Logix;
 /// CIP service handlers for Logix tag operations:
 /// Read Tag (0x4C), Write Tag (0x4D), Read Tag Fragmented (0x52),
 /// Write Tag Fragmented (0x53), Read Modify Write (0x4E).
+/// Uses ArrayPool to reduce GC pressure on hot read/write paths.
 /// </summary>
 public static class TagServices
 {
@@ -26,36 +28,24 @@ public static class TagServices
     public static CipServiceResponse HandleReadTag(Tag tag, byte serviceCode, ReadOnlyMemory<byte> data)
     {
         if (data.Length < 2)
-            return CipServiceResponse.Error(serviceCode, CipStatus.Error(0x13)); // Insufficient data
+            return CipServiceResponse.Error(serviceCode, CipStatus.Error(0x13));
 
         ushort elementCount = BinaryPrimitives.ReadUInt16LittleEndian(data.Span);
         int bytesToRead = elementCount * tag.ElementSize;
 
         if (bytesToRead > tag.DataSize)
-            return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2105)); // Beyond end
+            return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2105));
 
-        // Build response: tag_type (2 bytes) + data
-        var responseData = new byte[2 + bytesToRead];
-        BinaryPrimitives.WriteUInt16LittleEndian(responseData, tag.TagType);
-        tag.GetData(0, bytesToRead).CopyTo(responseData.AsSpan(2));
+        int responseLen = 2 + bytesToRead;
 
         // Check if data fits in reply
-        if (responseData.Length > MaxReplyData)
+        if (responseLen > MaxReplyData)
         {
-            // Return what fits with status 0x06 (Insufficient Packet Space)
-            int fitBytes = MaxReplyData - 2; // minus tag type
-            var partial = new byte[2 + fitBytes];
-            BinaryPrimitives.WriteUInt16LittleEndian(partial, tag.TagType);
-            tag.GetData(0, fitBytes).CopyTo(partial.AsSpan(2));
-            return new CipServiceResponse
-            {
-                ServiceCode = (byte)(serviceCode | 0x80),
-                Status = CipStatus.Error(0x06),
-                Data = partial,
-            };
+            int fitBytes = MaxReplyData - 2;
+            return BuildReadResponse(tag, serviceCode, 0, fitBytes, isPartial: true);
         }
 
-        return CipServiceResponse.Success(serviceCode, responseData);
+        return BuildReadResponse(tag, serviceCode, 0, bytesToRead, isPartial: false);
     }
 
     /// <summary>
@@ -72,9 +62,8 @@ public static class TagServices
         ushort tagType = BinaryPrimitives.ReadUInt16LittleEndian(span);
         ushort elementCount = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(2));
 
-        // Validate tag type matches
         if (tagType != tag.TagType)
-            return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2107)); // Type mismatch
+            return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2107));
 
         int bytesToWrite = elementCount * tag.ElementSize;
         if (data.Length < 4 + bytesToWrite)
@@ -83,7 +72,6 @@ public static class TagServices
         if (bytesToWrite > tag.DataSize)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2105));
 
-        // Write data — this fires Tag.ValueChanged
         tag.SetData(span.Slice(4, bytesToWrite));
 
         return CipServiceResponse.Success(serviceCode);
@@ -109,24 +97,9 @@ public static class TagServices
 
         int remaining = totalBytes - (int)byteOffset;
         int chunkSize = Math.Min(remaining, MaxReplyData - 2);
-
-        var responseData = new byte[2 + chunkSize];
-        BinaryPrimitives.WriteUInt16LittleEndian(responseData, tag.TagType);
-        tag.GetData((int)byteOffset, chunkSize).CopyTo(responseData.AsSpan(2));
-
         bool moreData = (int)byteOffset + chunkSize < totalBytes;
 
-        if (moreData)
-        {
-            return new CipServiceResponse
-            {
-                ServiceCode = (byte)(serviceCode | 0x80),
-                Status = CipStatus.Error(0x06), // More data
-                Data = responseData,
-            };
-        }
-
-        return CipServiceResponse.Success(serviceCode, responseData);
+        return BuildReadResponse(tag, serviceCode, (int)byteOffset, chunkSize, isPartial: moreData);
     }
 
     /// <summary>
@@ -170,9 +143,8 @@ public static class TagServices
         var span = data.Span;
         ushort maskSize = BinaryPrimitives.ReadUInt16LittleEndian(span);
 
-        // maskSize must be 1, 2, 4, 8, or 12
         if (maskSize != 1 && maskSize != 2 && maskSize != 4 && maskSize != 8 && maskSize != 12)
-            return CipServiceResponse.Error(serviceCode, CipStatus.Error(0x03)); // Bad parameter
+            return CipServiceResponse.Error(serviceCode, CipStatus.Error(0x03));
 
         if (data.Length < 2 + maskSize * 2)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0x13));
@@ -182,14 +154,54 @@ public static class TagServices
 
         // Apply: data = (data OR orMask) AND andMask
         int len = Math.Min(maskSize, tag.DataSize);
-        var modified = new byte[len];
-        tag.GetData(0, len).CopyTo(modified);
-        for (int i = 0; i < len; i++)
+        var rented = ArrayPool<byte>.Shared.Rent(len);
+        try
         {
-            modified[i] = (byte)((modified[i] | orMask[i]) & andMask[i]);
+            tag.GetData(0, len).CopyTo(rented);
+            for (int i = 0; i < len; i++)
+                rented[i] = (byte)((rented[i] | orMask[i]) & andMask[i]);
+            tag.SetData(rented.AsSpan(0, len));
         }
-        tag.SetData(modified);
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+        }
 
         return CipServiceResponse.Success(serviceCode);
+    }
+
+    /// <summary>
+    /// Shared helper to build a Read Tag / Read Tag Fragmented response.
+    /// Uses ArrayPool to avoid per-call allocations on the hot read path.
+    /// </summary>
+    private static CipServiceResponse BuildReadResponse(Tag tag, byte serviceCode,
+        int byteOffset, int dataLength, bool isPartial)
+    {
+        int responseLen = 2 + dataLength;
+        var rented = ArrayPool<byte>.Shared.Rent(responseLen);
+        try
+        {
+            BinaryPrimitives.WriteUInt16LittleEndian(rented, tag.TagType);
+            tag.GetData(byteOffset, dataLength).CopyTo(rented.AsSpan(2));
+
+            // Copy to exact-sized array for the response (ArrayPool may over-allocate)
+            var result = rented.AsSpan(0, responseLen).ToArray();
+
+            if (isPartial)
+            {
+                return new CipServiceResponse
+                {
+                    ServiceCode = (byte)(serviceCode | 0x80),
+                    Status = CipStatus.Error(0x06),
+                    Data = result,
+                };
+            }
+
+            return CipServiceResponse.Success(serviceCode, result);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+        }
     }
 }

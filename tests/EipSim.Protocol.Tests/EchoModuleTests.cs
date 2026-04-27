@@ -83,7 +83,7 @@ public class EchoModuleTests : IAsyncLifetime
         var respBuf = new byte[EncapsulationHeader.Size];
         await ReadExactAsync(stream, respBuf);
         var resp = EncapsulationHeader.Parse(respBuf);
-        Assert.Equal(0u, resp.Status);
+        Assert.Equal(EncapsulationStatus.Success, resp.Status);
 
         var payload = new byte[resp.Length];
         await ReadExactAsync(stream, payload);

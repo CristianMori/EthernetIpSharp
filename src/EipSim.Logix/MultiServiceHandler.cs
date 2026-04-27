@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Buffers.Binary;
 using EipSim.Cip;
 
@@ -15,6 +16,9 @@ public static class MultiServiceHandler
 {
     public const byte ServiceCode = 0x0A;
 
+    /// <summary>Max encoded size of a single CIP service response (header + data).</summary>
+    private const int MaxSingleResponseSize = 520;
+
     public static CipServiceResponse Handle(ICipDispatch dispatch, CipServiceRequest request)
     {
         if (request.Data.Length < 2)
@@ -23,66 +27,65 @@ public static class MultiServiceHandler
         var span = request.Data.Span;
         ushort serviceCount = BinaryPrimitives.ReadUInt16LittleEndian(span);
 
-        int headerSize = 2 + serviceCount * 2; // count + offset table
+        int headerSize = 2 + serviceCount * 2;
         if (request.Data.Length < headerSize)
             return CipServiceResponse.Error(request.ServiceCode, CipStatus.Error(0x13));
 
-        // Read offsets (relative to start of Request Data, i.e. after the MR request header)
+        // Read offsets
         var offsets = new ushort[serviceCount];
         for (int i = 0; i < serviceCount; i++)
             offsets[i] = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(2 + i * 2));
 
-        // Dispatch each sub-request and collect responses
-        var responses = new byte[serviceCount][];
-        for (int i = 0; i < serviceCount; i++)
+        // Encode each sub-response into a shared buffer to avoid per-response 4KB allocations
+        var encodeBuf = ArrayPool<byte>.Shared.Rent(MaxSingleResponseSize);
+        try
         {
-            int subStart = offsets[i];
-            int subEnd = i + 1 < serviceCount ? offsets[i + 1] : request.Data.Length;
-            var subRequestData = request.Data.Slice(subStart, subEnd - subStart);
+            // Collect encoded responses — each is an exact-sized byte[]
+            var responses = new byte[serviceCount][];
+            for (int i = 0; i < serviceCount; i++)
+            {
+                int subStart = offsets[i];
+                int subEnd = i + 1 < serviceCount ? offsets[i + 1] : request.Data.Length;
+                var subRequestData = request.Data.Slice(subStart, subEnd - subStart);
 
-            // Parse sub-request as MR format: service + path_size + path + data
-            var (svcCode, path, svcData) = MrCodec.ParseRequest(subRequestData);
+                var (svcCode, path, svcData) = MrCodec.ParseRequest(subRequestData);
+                var subResponse = dispatch.Dispatch(svcCode, path, svcData);
 
-            // Dispatch through the full CIP dispatch chain
-            var subResponse = dispatch.Dispatch(svcCode, path, svcData);
+                int respLen = subResponse.Encode(encodeBuf);
+                responses[i] = encodeBuf.AsSpan(0, respLen).ToArray();
+            }
 
-            // Encode the MR response
-            var respBuf = new byte[4096];
-            int respLen = subResponse.Encode(respBuf);
-            responses[i] = respBuf.AsSpan(0, respLen).ToArray();
-        }
+            // Build aggregate response
+            int respHeaderSize = 2 + serviceCount * 2;
+            int totalRespSize = respHeaderSize;
+            foreach (var r in responses)
+                totalRespSize += r.Length;
 
-        // Build the aggregate response
-        // Format: service_count (UINT) + offsets[] + packed responses
-        int respHeaderSize = 2 + serviceCount * 2;
-        int totalRespSize = respHeaderSize;
-        foreach (var r in responses)
-            totalRespSize += r.Length;
+            var result = new byte[totalRespSize];
+            int offset = 0;
 
-        var result = new byte[totalRespSize];
-        int offset = 0;
-
-        // Service count
-        BinaryPrimitives.WriteUInt16LittleEndian(result.AsSpan(offset), serviceCount);
-        offset += 2;
-
-        // Calculate and write response offsets
-        int dataStart = respHeaderSize;
-        int currentOffset = dataStart;
-        for (int i = 0; i < serviceCount; i++)
-        {
-            BinaryPrimitives.WriteUInt16LittleEndian(result.AsSpan(offset), (ushort)currentOffset);
+            BinaryPrimitives.WriteUInt16LittleEndian(result.AsSpan(offset), serviceCount);
             offset += 2;
-            currentOffset += responses[i].Length;
-        }
 
-        // Write packed responses
-        foreach (var r in responses)
+            int currentOffset = respHeaderSize;
+            for (int i = 0; i < serviceCount; i++)
+            {
+                BinaryPrimitives.WriteUInt16LittleEndian(result.AsSpan(offset), (ushort)currentOffset);
+                offset += 2;
+                currentOffset += responses[i].Length;
+            }
+
+            foreach (var r in responses)
+            {
+                r.CopyTo(result.AsSpan(offset));
+                offset += r.Length;
+            }
+
+            return CipServiceResponse.Success(request.ServiceCode, result);
+        }
+        finally
         {
-            r.CopyTo(result.AsSpan(offset));
-            offset += r.Length;
+            ArrayPool<byte>.Shared.Return(encodeBuf);
         }
-
-        return CipServiceResponse.Success(request.ServiceCode, result);
     }
 }

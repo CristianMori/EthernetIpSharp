@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using EipSim.Cip;
 
 namespace EipSim.Logix;
@@ -6,6 +7,7 @@ namespace EipSim.Logix;
 /// CipDispatcher subclass that models a Logix 5000 controller.
 /// Handles symbolic segment addressing by overriding OnUnhandled.
 /// Registers Symbol Object (0x6B) and Template Object (0x6C).
+/// Caches tag references by symbolic name to avoid dictionary lookup on every request.
 /// </summary>
 public class LogixDispatcher : CipDispatcher
 {
@@ -13,6 +15,9 @@ public class LogixDispatcher : CipDispatcher
 
     private readonly SymbolObject _symbolObject;
     private readonly TemplateObject _templateObject;
+
+    /// <summary>Cache of tag references by symbolic name — avoids repeated dictionary lookup.</summary>
+    private readonly ConcurrentDictionary<string, Tag> _symbolCache = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Convenience constructor using default implementations.</summary>
     public LogixDispatcher() : this(new TagDatabase()) { }
@@ -36,18 +41,28 @@ public class LogixDispatcher : CipDispatcher
         RegisterClass(messageRouter);
 
         // Auto-register CIP instances when tags/templates are added
-        tags.TagAdded += tag => _symbolObject.EnsureInstance(tag);
+        tags.TagAdded += OnTagAdded;
         tags.TemplateAdded += template => _templateObject.EnsureInstance(template);
 
         // Sync any tags/templates that already exist in the database
         SyncCipInstances();
     }
 
+    private void OnTagAdded(Tag tag)
+    {
+        _symbolObject.EnsureInstance(tag);
+        // Pre-populate cache so even the first request is fast
+        _symbolCache[tag.Name] = tag;
+    }
+
     /// <summary>Ensure CIP instances exist for all tags and templates.</summary>
     public void SyncCipInstances()
     {
         foreach (var tag in Tags.AllTags)
+        {
             _symbolObject.EnsureInstance(tag);
+            _symbolCache[tag.Name] = tag;
+        }
         foreach (var template in Tags.AllTemplates)
             _templateObject.EnsureInstance(template);
     }
@@ -56,9 +71,15 @@ public class LogixDispatcher : CipDispatcher
     {
         if (path.SymbolicName != null)
         {
-            var tag = Tags.FindByName(path.SymbolicName);
-            if (tag == null)
-                return CipServiceResponse.Error(serviceCode, CipStatus.Error(0x05));
+            // Fast path: check cache first
+            if (!_symbolCache.TryGetValue(path.SymbolicName, out var tag))
+            {
+                // Cache miss: look up and cache
+                tag = Tags.FindByName(path.SymbolicName);
+                if (tag == null)
+                    return CipServiceResponse.Error(serviceCode, CipStatus.Error(0x05));
+                _symbolCache[path.SymbolicName] = tag;
+            }
 
             return DispatchTagService(tag, serviceCode, data, path);
         }

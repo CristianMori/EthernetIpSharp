@@ -158,7 +158,7 @@ public class AddressingTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Instance_InvalidInstanceId_ReturnsPathDestinationUnknown()
+    public async Task Instance_InvalidInstanceId_ReturnsObjectDoesNotExist()
     {
         using var client = await ConnectAsync();
         var stream = client.GetStream();
@@ -167,7 +167,7 @@ public class AddressingTests : IAsyncLifetime
         var path = BuildInstancePath(99999);
         var (status, _) = await SendCipServiceAsync(stream, session, 0x4C, path, ElementCount(1));
 
-        Assert.Equal(0x05, status); // PathDestinationUnknown — instance doesn't exist in Symbol class
+        Assert.Equal(0x16, status); // ObjectDoesNotExist — class 0x6B exists but instance 99999 doesn't
     }
 
     // ========== Both methods return same data ==========

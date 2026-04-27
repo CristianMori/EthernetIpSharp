@@ -293,7 +293,7 @@ public sealed class EipAdapter : IAsyncDisposable
         {
             Command = req.Command,
             SessionHandle = req.SessionHandle,
-            Status = (uint)status,
+            Status = status,
             SenderContext = req.SenderContext,
         };
         var buf = new byte[EncapsulationHeader.Size];

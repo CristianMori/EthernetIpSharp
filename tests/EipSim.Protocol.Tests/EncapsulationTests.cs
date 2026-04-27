@@ -85,7 +85,7 @@ public class EncapsulationTests : IAsyncLifetime
 
         var response = EncapsulationHeader.Parse(responseBuf);
         Assert.Equal(EncapsulationCommand.RegisterSession, response.Command);
-        Assert.Equal(0u, response.Status);
+        Assert.Equal(EncapsulationStatus.Success, response.Status);
         Assert.NotEqual(0u, response.SessionHandle);
         Assert.Equal(request.SenderContext, response.SenderContext);
     }
@@ -112,7 +112,7 @@ public class EncapsulationTests : IAsyncLifetime
         var response = EncapsulationHeader.Parse(headerBuf);
 
         Assert.Equal(EncapsulationCommand.ListIdentity, response.Command);
-        Assert.Equal(0u, response.Status);
+        Assert.Equal(EncapsulationStatus.Success, response.Status);
         Assert.True(response.Length > 0);
 
         // Read payload
@@ -174,7 +174,7 @@ public class EncapsulationTests : IAsyncLifetime
         await ReadExactAsync(stream, responseBuf);
         var response = EncapsulationHeader.Parse(responseBuf);
 
-        Assert.Equal((uint)EncapsulationStatus.InvalidSessionHandle, response.Status);
+        Assert.Equal(EncapsulationStatus.InvalidSessionHandle, response.Status);
     }
 
     [Fact]
@@ -213,7 +213,7 @@ public class EncapsulationTests : IAsyncLifetime
         await ReadExactAsync(stream, responseBuf);
         var response = EncapsulationHeader.Parse(responseBuf);
 
-        Assert.Equal((uint)EncapsulationStatus.InvalidSessionHandle, response.Status);
+        Assert.Equal(EncapsulationStatus.InvalidSessionHandle, response.Status);
     }
 
     [Fact]
@@ -267,7 +267,7 @@ public class EncapsulationTests : IAsyncLifetime
         var responseHeader = EncapsulationHeader.Parse(headerBuf);
 
         Assert.Equal(EncapsulationCommand.SendRRData, responseHeader.Command);
-        Assert.Equal(0u, responseHeader.Status);
+        Assert.Equal(EncapsulationStatus.Success, responseHeader.Status);
 
         var responsePayload = new byte[responseHeader.Length];
         await ReadExactAsync(stream, responsePayload);
