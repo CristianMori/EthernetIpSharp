@@ -1,22 +1,26 @@
 using EipSim.Cip;
-using EipSim.Protocol;
 
 namespace EipSim.Device;
 
 /// <summary>
 /// CIP Identity Object (Class 0x01). Required by all EtherNet/IP devices.
-/// Instance 1 attributes per Vol1 Chapter 5.
+/// Instance 1 holds device identity attributes per Vol1 Chapter 5.
 /// </summary>
 public static class IdentityObject
 {
+    /// <summary>CIP class code for Identity.</summary>
     public const uint ClassCode = 0x01;
 
+    /// <summary>
+    /// Create an Identity CIP class with instance 1 populated from the given identity info.
+    /// Registers standard Get/Set services and the Reset service (no-op for simulator).
+    /// </summary>
     public static CipClass Create(IdentityInfo identity)
     {
         var cls = new CipClass(ClassCode, "Identity", revision: 1);
         cls.AddStandardInstanceServices();
 
-        // Add Reset service
+        // Reset service — no-op for a simulator, returns success
         cls.AddInstanceService(new CipServiceDefinition(CipStandardServices.Reset, "Reset", HandleReset));
 
         var inst = cls.CreateInstance(1);
@@ -55,7 +59,6 @@ public static class IdentityObject
 
     private static CipServiceResponse HandleReset(CipInstance instance, CipServiceRequest request)
     {
-        // For a simulator, Reset is a no-op but we return success
         return CipServiceResponse.Success(request.ServiceCode);
     }
 }
