@@ -18,12 +18,19 @@ public sealed class EipScanner : IAsyncDisposable
     private EipUdpTransport? _udp;
     private ushort _nextConnSerial = 1;
 
+    /// <summary>Session handle assigned by the target during RegisterSession.</summary>
     public uint SessionHandle { get; private set; }
+
+    /// <summary>True if TCP is connected and a session is registered.</summary>
     public bool IsConnected => _client?.Connected == true && SessionHandle != 0;
+
+    /// <summary>Local TCP endpoint after connection.</summary>
     public IPEndPoint? LocalEndpoint { get; private set; }
+
+    /// <summary>Remote (target) TCP endpoint after connection.</summary>
     public IPEndPoint? RemoteEndpoint { get; private set; }
 
-    /// <summary>Connect to a target device and register a session.</summary>
+    /// <summary>Connect to a target device by IP address and register a session.</summary>
     public async Task ConnectAsync(IPAddress address, int port = EipAdapter.DefaultPort, CancellationToken ct = default)
     {
         _client = new TcpClient();
@@ -42,6 +49,7 @@ public sealed class EipScanner : IAsyncDisposable
         SessionHandle = await RegisterSessionAsync(ct);
     }
 
+    /// <summary>Connect to a target device by hostname and register a session.</summary>
     public Task ConnectAsync(string host, int port = EipAdapter.DefaultPort, CancellationToken ct = default)
     {
         var address = Dns.GetHostAddresses(host).First(a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork);
@@ -350,6 +358,7 @@ public sealed class EipScanner : IAsyncDisposable
         }
     }
 
+    /// <summary>Dispose: close UDP transport and disconnect.</summary>
     public async ValueTask DisposeAsync()
     {
         if (_udp != null) await _udp.DisposeAsync();
