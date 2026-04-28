@@ -120,7 +120,7 @@ public sealed class TagClient : IAsyncDisposable
     /// <summary>
     /// Write a .NET string to a Logix STRING tag.
     /// Builds the Logix STRING structure: LEN (DINT) + DATA (SINT[82]).
-    /// Requires the structure handle from the template — pass it in tagType.
+    /// Requires the structure handle from the template.
     /// </summary>
     public async Task WriteStringAsync(string tagName, string value, ushort structureHandle, CancellationToken ct = default)
     {
@@ -128,19 +128,37 @@ public sealed class TagClient : IAsyncDisposable
         int len = Math.Min(strBytes.Length, LogixDataTypes.StringMaxLength);
 
         var structData = new byte[LogixDataTypes.StringStructureSize];
-        BinaryPrimitives.WriteInt32LittleEndian(structData, len); // LEN
-        strBytes.AsSpan(0, len).CopyTo(structData.AsSpan(LogixDataTypes.StringDataOffset)); // DATA
+        BinaryPrimitives.WriteInt32LittleEndian(structData, len);
+        strBytes.AsSpan(0, len).CopyTo(structData.AsSpan(LogixDataTypes.StringDataOffset));
 
-        await WriteRawAsync(tagName, structureHandle, 1, structData, ct);
+        await WriteStructAsync(tagName, structureHandle, 1, structData, ct);
     }
 
-    /// <summary>Write raw data to a tag with explicit tag type and element count.</summary>
+    /// <summary>Write raw data to a tag with explicit tag type and element count (atomic types).</summary>
     public async Task WriteRawAsync(string tagName, ushort tagType, ushort elementCount, byte[] value, CancellationToken ct = default)
     {
         var data = new byte[4 + value.Length];
         BinaryPrimitives.WriteUInt16LittleEndian(data, tagType);
         BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(2), elementCount);
         value.CopyTo(data.AsSpan(4));
+
+        var path = BuildSymbolicPath(tagName);
+        await SendCipAsync(TagServices.WriteTag, path, data, ct);
+    }
+
+    /// <summary>
+    /// Write a structure tag. The tag type parameter for structures consists of
+    /// TWO 16-bit values: 0x02A0 (structure flag) + structure handle.
+    /// This differs from atomic writes which use a single 16-bit tag type.
+    /// </summary>
+    public async Task WriteStructAsync(string tagName, ushort structureHandle, ushort elementCount, byte[] value, CancellationToken ct = default)
+    {
+        // Structure write: tag_type(2) = 0x02A0 + struct_handle(2) + element_count(2) + data
+        var data = new byte[6 + value.Length];
+        BinaryPrimitives.WriteUInt16LittleEndian(data, 0x02A0); // structure flag
+        BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(2), structureHandle);
+        BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(4), elementCount);
+        value.CopyTo(data.AsSpan(6));
 
         var path = BuildSymbolicPath(tagName);
         await SendCipAsync(TagServices.WriteTag, path, data, ct);
