@@ -100,32 +100,78 @@ public sealed class TagDatabase : ITagDatabase
     private readonly ConcurrentDictionary<ushort, TemplateDefinition> _templates = new();
     private int _nextTemplateId = 0x100; // Start above atomic range
 
-    /// <summary>Define a structure template (UDT).</summary>
+    /// <summary>
+    /// Define a structure template (UDT) with proper Logix alignment and BOOL packing.
+    ///
+    /// Logix alignment rules (from 1756-PM020):
+    /// - SINT/BOOL: 8-bit boundary (1 byte)
+    /// - INT: 16-bit boundary (2 bytes)
+    /// - DINT/REAL/DWORD: 32-bit boundary (4 bytes)
+    /// - LINT/LREAL: 64-bit boundary (8 bytes)
+    /// - Structures begin and end on 32-bit boundaries
+    ///
+    /// Logix BOOL packing:
+    /// - Consecutive BOOLs in a UDT are packed into hidden SINT host members
+    /// - Up to 8 BOOLs share one host SINT byte
+    /// - Each BOOL records its bit position (0-7) in the Info field
+    /// - The host SINT is named "ZZZZZZZZZZname#" and is not visible in Data Monitor
+    /// </summary>
     public TemplateDefinition AddTemplate(string name, params TemplateMember[] members)
     {
         ushort instanceId = (ushort)Interlocked.Increment(ref _nextTemplateId);
 
-        // Calculate structure size and member offsets
+        var resolvedMembers = new List<TemplateMemberInfo>();
         int offset = 0;
-        var resolvedMembers = new TemplateMemberInfo[members.Length];
+        int boolBitPos = 0;     // Current bit position within BOOL host byte
+        int boolHostOffset = -1; // Offset of current BOOL host byte (-1 = no active host)
+        int boolHostIndex = 0;   // Counter for naming host bytes
+
         for (int i = 0; i < members.Length; i++)
         {
             var m = members[i];
-            int memberSize = m.ArraySize > 0
-                ? LogixDataTypes.GetElementSize(m.DataType) * m.ArraySize
-                : LogixDataTypes.GetElementSize(m.DataType);
 
-            // Align to element boundary
-            int elemSize = LogixDataTypes.GetElementSize(m.DataType);
-            if (elemSize > 1)
-                offset = (offset + elemSize - 1) / elemSize * elemSize;
+            if (m.DataType == LogixDataTypes.BOOL && m.ArraySize == 0)
+            {
+                // BOOL packing: pack into host SINT byte
+                if (boolBitPos == 0 || boolBitPos >= 8)
+                {
+                    // Need a new host SINT byte — align to 1 byte (SINT alignment)
+                    boolHostOffset = offset;
+                    boolBitPos = 0;
 
-            resolvedMembers[i] = new TemplateMemberInfo(m.Name, m.DataType, offset, m.ArraySize, elemSize);
-            offset += memberSize;
+                    // Add hidden host SINT member
+                    string hostName = $"ZZZZZZZZZZ{name}{boolHostIndex++}";
+                    resolvedMembers.Add(new TemplateMemberInfo(hostName, LogixDataTypes.SINT, boolHostOffset, 0, 1));
+                    offset += 1;
+                }
+
+                // Add BOOL at current bit position within the host byte.
+                // ArraySize field stores bit position for BOOLs (matches PLC template Info field).
+                resolvedMembers.Add(new TemplateMemberInfo(m.Name, LogixDataTypes.BOOL, boolHostOffset, boolBitPos, 0));
+                boolBitPos++;
+            }
+            else
+            {
+                // Non-BOOL: reset BOOL packing
+                boolBitPos = 0;
+                boolHostOffset = -1;
+
+                int elemSize = LogixDataTypes.GetElementSize(m.DataType);
+                if (elemSize <= 0) elemSize = 4; // Default for unknown/struct types
+
+                // Alignment based on data type
+                int alignment = GetAlignment(m.DataType, elemSize);
+                offset = Align(offset, alignment);
+
+                int memberSize = m.ArraySize > 0 ? elemSize * m.ArraySize : elemSize;
+
+                resolvedMembers.Add(new TemplateMemberInfo(m.Name, m.DataType, offset, m.ArraySize, elemSize));
+                offset += memberSize;
+            }
         }
 
-        // Pad to 32-bit boundary
-        offset = (offset + 3) / 4 * 4;
+        // Structures end on 32-bit boundary
+        offset = Align(offset, 4);
 
         // Simple structure handle (in a real controller this is a CRC)
         ushort structHandle = (ushort)(0x8000 | instanceId);
@@ -135,7 +181,7 @@ public sealed class TagDatabase : ITagDatabase
             name: name,
             structureHandle: structHandle,
             structureSize: (uint)offset,
-            members: resolvedMembers);
+            members: resolvedMembers.ToArray());
 
         _templates[instanceId] = template;
         TemplateAdded?.Invoke(template);
@@ -147,6 +193,31 @@ public sealed class TagDatabase : ITagDatabase
         _templates.TryGetValue(instanceId, out var t) ? t : null;
 
     public IEnumerable<TemplateDefinition> AllTemplates => _templates.Values;
+
+    /// <summary>
+    /// Get the required alignment for a Logix data type.
+    /// SINT/BOOL: 1, INT: 2, DINT/REAL/DWORD: 4, LINT/LREAL: 8.
+    /// </summary>
+    private static int GetAlignment(ushort dataType, int elementSize)
+    {
+        ushort baseType = (ushort)(dataType & 0x00FF);
+        return baseType switch
+        {
+            0xC1 => 1,  // BOOL
+            0xC2 => 1,  // SINT
+            0xC3 => 2,  // INT
+            0xC4 => 4,  // DINT
+            0xC5 => 8,  // LINT — 8-byte aligned
+            0xCA => 4,  // REAL
+            0xCB => 8,  // LREAL — 8-byte aligned
+            0xD3 => 4,  // DWORD
+            _ => Math.Min(elementSize, 4), // Unknown: align to element size, max 4
+        };
+    }
+
+    /// <summary>Align offset up to the given boundary.</summary>
+    private static int Align(int offset, int alignment) =>
+        (offset + alignment - 1) / alignment * alignment;
 }
 
 /// <summary>
