@@ -94,6 +94,46 @@ public sealed class TagClient : IAsyncDisposable
         await SendCipAsync(TagServices.WriteTag, path, data, ct);
     }
 
+    /// <summary>
+    /// Read a Logix STRING tag and return it as a .NET string.
+    /// Logix STRING is a structure: LEN (DINT @ 0) + DATA (SINT[82] @ 4).
+    /// This is NOT the CIP STRING type (0xD0) — Logix uses a predefined UDT.
+    ///
+    /// Read Tag response for a structure: tag_type(2) + struct_handle(2) + structure_data.
+    /// So the actual LEN starts at byte offset 4 in the response.
+    /// </summary>
+    public async Task<string> ReadStringAsync(string tagName, CancellationToken ct = default)
+    {
+        var raw = await ReadTagRawAsync(tagName, 1, ct);
+        // Response layout: tag_type(2) + struct_handle(2) + LEN(4) + DATA(82) + pad(2)
+        const int headerSize = 4; // tag_type + struct_handle
+        if (raw.Length < headerSize + LogixDataTypes.StringDataOffset)
+            return "";
+
+        int len = BinaryPrimitives.ReadInt32LittleEndian(raw.AsSpan(headerSize + LogixDataTypes.StringLenOffset));
+        if (len <= 0) return "";
+
+        int maxLen = Math.Min(len, Math.Min(LogixDataTypes.StringMaxLength, raw.Length - headerSize - LogixDataTypes.StringDataOffset));
+        return Encoding.ASCII.GetString(raw, headerSize + LogixDataTypes.StringDataOffset, maxLen);
+    }
+
+    /// <summary>
+    /// Write a .NET string to a Logix STRING tag.
+    /// Builds the Logix STRING structure: LEN (DINT) + DATA (SINT[82]).
+    /// Requires the structure handle from the template — pass it in tagType.
+    /// </summary>
+    public async Task WriteStringAsync(string tagName, string value, ushort structureHandle, CancellationToken ct = default)
+    {
+        var strBytes = Encoding.ASCII.GetBytes(value);
+        int len = Math.Min(strBytes.Length, LogixDataTypes.StringMaxLength);
+
+        var structData = new byte[LogixDataTypes.StringStructureSize];
+        BinaryPrimitives.WriteInt32LittleEndian(structData, len); // LEN
+        strBytes.AsSpan(0, len).CopyTo(structData.AsSpan(LogixDataTypes.StringDataOffset)); // DATA
+
+        await WriteRawAsync(tagName, structureHandle, 1, structData, ct);
+    }
+
     /// <summary>Write raw data to a tag with explicit tag type and element count.</summary>
     public async Task WriteRawAsync(string tagName, ushort tagType, ushort elementCount, byte[] value, CancellationToken ct = default)
     {
@@ -518,7 +558,7 @@ public sealed class TagClient : IAsyncDisposable
         if (typeof(T) == typeof(short) || typeof(T) == typeof(ushort)) return LogixDataTypes.INT;
         if (typeof(T) == typeof(sbyte) || typeof(T) == typeof(byte)) return LogixDataTypes.SINT;
         if (typeof(T) == typeof(long) || typeof(T) == typeof(ulong)) return LogixDataTypes.LINT;
-        if (typeof(T) == typeof(double)) return 0x00CB; // LREAL
+        if (typeof(T) == typeof(double)) return LogixDataTypes.LREAL;
         throw new NotSupportedException($"Cannot map {typeof(T).Name} to a Logix tag type");
     }
 }

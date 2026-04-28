@@ -1,23 +1,19 @@
 using EipSim.Logix;
 
-Console.WriteLine("=== TagClient → Real PLC (full browse) ===");
+Console.WriteLine("=== TagClient String Test ===");
 
 await using var client = new TagClient("192.168.204.128");
 await client.ConnectAsync();
 
-var result = await client.BrowseTagsAsync();
+// Read AString
+var strValue = await client.ReadStringAsync("AString");
+Console.WriteLine($"AString = '{strValue}' (len={strValue.Length})");
 
-Console.WriteLine($"Tags: {result.Tags.Count} total, {result.UserTags.Count()} user");
-Console.WriteLine($"Templates: {result.Templates.Count}\n");
+// Read raw to see the structure
+var raw = await client.ReadTagRawAsync("AString");
+Console.Write("Raw bytes: ");
+for (int i = 0; i < Math.Min(raw.Length, 30); i++)
+    Console.Write($"{raw[i]:X2} ");
+Console.WriteLine(raw.Length > 30 ? "..." : "");
 
-foreach (var tag in result.UserTags)
-{
-    Console.WriteLine($"{tag}");
-    if (tag.Template != null)
-    {
-        Console.WriteLine($"  [{tag.Template.StructureSize} bytes, {tag.Template.MemberCount} members]");
-        foreach (var m in tag.Template.Members)
-            Console.WriteLine($"    {m}");
-    }
-    Console.WriteLine();
-}
+Console.WriteLine("\nDone.");
