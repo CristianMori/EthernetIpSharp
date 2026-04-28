@@ -147,6 +147,146 @@ public sealed class TagClient : IAsyncDisposable
     }
 
     /// <summary>
+    /// Read multiple tags in a single request using Multiple Service Packet (0x0A).
+    /// Returns a dictionary of tag name → raw response bytes (tag_type + data).
+    /// Much faster than individual reads when accessing many tags.
+    /// </summary>
+    public async Task<Dictionary<string, byte[]>> ReadMultipleAsync(IEnumerable<string> tagNames, CancellationToken ct = default)
+    {
+        var names = tagNames.ToList();
+        if (names.Count == 0) return new();
+
+        // Build sub-requests: each is a Read Tag MR request
+        var subRequests = new List<byte[]>();
+        foreach (var name in names)
+        {
+            var path = BuildSymbolicPath(name);
+            var reqData = new byte[] { 0x01, 0x00 }; // 1 element
+            var mr = new byte[2 + path.Length + reqData.Length];
+            mr[0] = TagServices.ReadTag;
+            mr[1] = (byte)(path.Length / 2);
+            path.CopyTo(mr.AsSpan(2));
+            reqData.CopyTo(mr.AsSpan(2 + path.Length));
+            subRequests.Add(mr);
+        }
+
+        var responses = await SendMultiServiceAsync(subRequests, ct);
+
+        var result = new Dictionary<string, byte[]>();
+        for (int i = 0; i < names.Count && i < responses.Count; i++)
+        {
+            var (status, data) = responses[i];
+            if (status == 0x00 || status == 0x06)
+                result[names[i]] = data;
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Write multiple atomic tags in a single request using Multiple Service Packet (0x0A).
+    /// Each entry is (tagName, tagType, value as byte[]).
+    /// Returns a dictionary of tag name → success (true/false).
+    /// </summary>
+    public async Task<Dictionary<string, bool>> WriteMultipleAsync(
+        IEnumerable<(string Name, ushort TagType, byte[] Value)> writes, CancellationToken ct = default)
+    {
+        var writeList = writes.ToList();
+        if (writeList.Count == 0) return new();
+
+        var subRequests = new List<byte[]>();
+        foreach (var (name, tagType, value) in writeList)
+        {
+            var path = BuildSymbolicPath(name);
+            // Write Tag data: tag_type(2) + element_count(2) + value
+            var writeData = new byte[4 + value.Length];
+            BinaryPrimitives.WriteUInt16LittleEndian(writeData, tagType);
+            BinaryPrimitives.WriteUInt16LittleEndian(writeData.AsSpan(2), 1);
+            value.CopyTo(writeData.AsSpan(4));
+
+            var mr = new byte[2 + path.Length + writeData.Length];
+            mr[0] = TagServices.WriteTag;
+            mr[1] = (byte)(path.Length / 2);
+            path.CopyTo(mr.AsSpan(2));
+            writeData.CopyTo(mr.AsSpan(2 + path.Length));
+            subRequests.Add(mr);
+        }
+
+        var responses = await SendMultiServiceAsync(subRequests, ct);
+
+        var result = new Dictionary<string, bool>();
+        for (int i = 0; i < writeList.Count && i < responses.Count; i++)
+            result[writeList[i].Name] = responses[i].status == 0x00;
+        return result;
+    }
+
+    /// <summary>
+    /// Send a Multiple Service Packet (0x0A) to the Message Router.
+    /// Takes a list of pre-built MR sub-requests, packs them, sends, and parses responses.
+    /// Returns a list of (generalStatus, responseData) per sub-request.
+    /// </summary>
+    private async Task<List<(byte status, byte[] data)>> SendMultiServiceAsync(
+        List<byte[]> subRequests, CancellationToken ct)
+    {
+        // Build Multiple Service Packet request data:
+        // service_count(2) + offsets[](2 each) + packed sub-requests
+        int headerSize = 2 + subRequests.Count * 2;
+        int totalPayload = headerSize;
+        foreach (var sr in subRequests)
+            totalPayload += sr.Length;
+
+        var msData = new byte[totalPayload];
+        BinaryPrimitives.WriteUInt16LittleEndian(msData, (ushort)subRequests.Count);
+
+        // Calculate and write offsets
+        int currentOffset = headerSize;
+        for (int i = 0; i < subRequests.Count; i++)
+        {
+            BinaryPrimitives.WriteUInt16LittleEndian(msData.AsSpan(2 + i * 2), (ushort)currentOffset);
+            currentOffset += subRequests[i].Length;
+        }
+
+        // Pack sub-requests
+        int off = headerSize;
+        foreach (var sr in subRequests)
+        {
+            sr.CopyTo(msData.AsSpan(off));
+            off += sr.Length;
+        }
+
+        // Send to Message Router (class 0x02, instance 1) with service 0x0A
+        var mrPath = new byte[] { 0x20, 0x02, 0x24, 0x01 };
+        var (status, respData) = await SendCipWithStatusAsync(0x0A, mrPath, msData, ct);
+
+        if (status != 0x00)
+            throw new InvalidOperationException($"Multiple Service Packet failed: status=0x{status:X2}");
+
+        // Parse response: service_count(2) + offsets[](2 each) + packed responses
+        var results = new List<(byte, byte[])>();
+        if (respData.Length < 2) return results;
+
+        ushort respCount = BinaryPrimitives.ReadUInt16LittleEndian(respData);
+        var respOffsets = new ushort[respCount];
+        for (int i = 0; i < respCount; i++)
+            respOffsets[i] = BinaryPrimitives.ReadUInt16LittleEndian(respData.AsSpan(2 + i * 2));
+
+        for (int i = 0; i < respCount; i++)
+        {
+            int start = respOffsets[i];
+            int end = i + 1 < respCount ? respOffsets[i + 1] : respData.Length;
+            if (start + 4 > respData.Length) break;
+
+            // Each sub-response is an MR response: service(1) + reserved(1) + status(1) + addStatusSize(1) + ...
+            byte subStatus = respData[start + 2];
+            byte addSize = respData[start + 3];
+            int dataStart = start + 4 + addSize * 2;
+            var subData = dataStart < end ? respData[dataStart..end] : [];
+            results.Add((subStatus, subData));
+        }
+
+        return results;
+    }
+
+    /// <summary>
     /// Write a structure tag. The tag type parameter for structures consists of
     /// TWO 16-bit values: 0x02A0 (structure flag) + structure handle.
     /// This differs from atomic writes which use a single 16-bit tag type.
