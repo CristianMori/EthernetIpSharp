@@ -8,6 +8,10 @@ using EipSim.Protocol;
 
 namespace EipSim.Logix.Tests;
 
+/// <summary>
+/// Advanced Logix tests: templates, Multiple Service Packet, fragmented read, tag browsing.
+/// End-to-end over TCP with LogixDispatcher.
+/// </summary>
 public class AdvancedLogixTests : IAsyncLifetime
 {
     private LogixDispatcher _logix = null!;

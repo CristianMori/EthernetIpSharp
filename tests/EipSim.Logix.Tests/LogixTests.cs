@@ -7,6 +7,9 @@ using EipSim.Protocol;
 
 namespace EipSim.Logix.Tests;
 
+/// <summary>
+/// Core Logix tag read/write tests over TCP with symbolic segment addressing.
+/// </summary>
 public class LogixTests : IAsyncLifetime
 {
     private LogixDispatcher _logix = null!;

@@ -7,6 +7,9 @@ using EipSim.Protocol;
 
 namespace EipSim.Protocol.Tests;
 
+/// <summary>
+/// Encapsulation layer tests: RegisterSession, ListIdentity, SendRRData, session validation.
+/// </summary>
 public class EncapsulationTests : IAsyncLifetime
 {
     private VirtualDevice _device = null!;
