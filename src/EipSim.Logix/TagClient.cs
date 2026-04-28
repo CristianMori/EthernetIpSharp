@@ -63,6 +63,20 @@ public sealed class TagClient : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Read an entire structure tag and parse its members using the template definition.
+    /// Returns a StructureValue with named member access.
+    /// The template must have been obtained from BrowseTagsAsync or ReadTemplateAsync.
+    /// </summary>
+    public async Task<StructureValue> ReadStructAsync(string tagName, TemplateInfo template, CancellationToken ct = default)
+    {
+        var raw = await ReadTagRawAsync(tagName, 1, ct);
+        // Response: tag_type(2) + struct_handle(2) + structure_data
+        const int headerSize = 4; // tag_type + struct_handle
+        var structData = raw.Length > headerSize ? raw[headerSize..] : [];
+        return new StructureValue(template, structData);
+    }
+
     /// <summary>Read a tag and return the raw response (tag_type + data bytes).</summary>
     public async Task<byte[]> ReadTagRawAsync(string tagName, ushort elementCount = 1, CancellationToken ct = default)
     {
@@ -696,15 +710,38 @@ public sealed class TagClient : IAsyncDisposable
         }
     }
 
-    /// <summary>Build ANSI Extended Symbolic Segment path bytes for a tag name.</summary>
+    /// <summary>
+    /// Build ANSI Extended Symbolic Segment path bytes for a tag name.
+    /// Handles dotted paths (e.g. "Program:MainProgram.Framework") by encoding
+    /// each segment separated by '.' as a separate symbolic segment.
+    /// This matches how the PLC expects structured member access.
+    /// </summary>
     private static byte[] BuildSymbolicPath(string name)
     {
-        var nameBytes = Encoding.ASCII.GetBytes(name);
-        int padded = nameBytes.Length % 2 != 0 ? nameBytes.Length + 1 : nameBytes.Length;
-        var path = new byte[2 + padded];
-        path[0] = 0x91;
-        path[1] = (byte)nameBytes.Length;
-        nameBytes.CopyTo(path, 2);
+        var parts = name.Split('.');
+        var segments = new List<byte[]>();
+
+        foreach (var part in parts)
+        {
+            var partBytes = Encoding.ASCII.GetBytes(part);
+            int padded = partBytes.Length % 2 != 0 ? partBytes.Length + 1 : partBytes.Length;
+            var seg = new byte[2 + padded];
+            seg[0] = 0x91;
+            seg[1] = (byte)partBytes.Length;
+            partBytes.CopyTo(seg, 2);
+            segments.Add(seg);
+        }
+
+        int totalLen = 0;
+        foreach (var s in segments) totalLen += s.Length;
+
+        var path = new byte[totalLen];
+        int off = 0;
+        foreach (var s in segments)
+        {
+            s.CopyTo(path, off);
+            off += s.Length;
+        }
         return path;
     }
 
@@ -818,5 +855,175 @@ public sealed class TemplateMemberDetail
         string type = $"0x{DataType:X4}";
         string arr = IsArray ? $"[{ArraySize}]" : "";
         return $"{Name}: {type}{arr} @ offset {Offset}";
+    }
+}
+
+/// <summary>
+/// A parsed structure value — provides named access to individual members
+/// from a raw structure byte blob using the template definition.
+/// </summary>
+public sealed class StructureValue
+{
+    /// <summary>The template that describes this structure's layout.</summary>
+    public TemplateInfo Template { get; }
+
+    /// <summary>Raw structure data bytes.</summary>
+    public byte[] RawData { get; }
+
+    public StructureValue(TemplateInfo template, byte[] rawData)
+    {
+        Template = template;
+        RawData = rawData;
+    }
+
+    /// <summary>Get a member by name. Returns null if not found.</summary>
+    public TemplateMemberDetail? GetMember(string name) =>
+        Template.Members.FirstOrDefault(m => m.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>Read a typed value from a named member.</summary>
+    public T Get<T>(string memberName) where T : unmanaged
+    {
+        var member = GetMember(memberName)
+            ?? throw new KeyNotFoundException($"Member '{memberName}' not found in {Template.Name}");
+
+        if (member.Offset + System.Runtime.CompilerServices.Unsafe.SizeOf<T>() > RawData.Length)
+            throw new InvalidOperationException($"Member '{memberName}' at offset {member.Offset} exceeds data length {RawData.Length}");
+
+        return System.Runtime.CompilerServices.Unsafe.ReadUnaligned<T>(ref RawData[(int)member.Offset]);
+    }
+
+    /// <summary>Read a BOOL member (bit within a SINT host byte).</summary>
+    public bool GetBool(string memberName)
+    {
+        var member = GetMember(memberName)
+            ?? throw new KeyNotFoundException($"Member '{memberName}' not found in {Template.Name}");
+
+        if (member.DataType != 0x00C1)
+            throw new InvalidOperationException($"Member '{memberName}' is not BOOL (type=0x{member.DataType:X4})");
+
+        byte hostByte = RawData[(int)member.Offset];
+        int bitPosition = member.Info; // Info field holds the bit position for BOOLs
+        return (hostByte & (1 << bitPosition)) != 0;
+    }
+
+    /// <summary>Read a STRING member (Logix STRING structure nested at the given offset).</summary>
+    public string GetString(string memberName)
+    {
+        var member = GetMember(memberName)
+            ?? throw new KeyNotFoundException($"Member '{memberName}' not found in {Template.Name}");
+
+        int off = (int)member.Offset;
+        if (off + LogixDataTypes.StringDataOffset >= RawData.Length) return "";
+
+        int len = BinaryPrimitives.ReadInt32LittleEndian(RawData.AsSpan(off));
+        if (len <= 0) return "";
+
+        int maxLen = Math.Min(len, Math.Min(LogixDataTypes.StringMaxLength, RawData.Length - off - LogixDataTypes.StringDataOffset));
+        return Encoding.ASCII.GetString(RawData, off + LogixDataTypes.StringDataOffset, maxLen);
+    }
+
+    /// <summary>Read an array member and return it as a typed array.</summary>
+    public T[] GetArray<T>(string memberName) where T : unmanaged
+    {
+        var member = GetMember(memberName)
+            ?? throw new KeyNotFoundException($"Member '{memberName}' not found in {Template.Name}");
+
+        if (!member.IsArray)
+            throw new InvalidOperationException($"Member '{memberName}' is not an array");
+
+        int elemSize;
+        unsafe { elemSize = sizeof(T); }
+        int count = member.ArraySize;
+        var result = new T[count];
+        int off = (int)member.Offset;
+
+        for (int i = 0; i < count && off + elemSize <= RawData.Length; i++)
+        {
+            result[i] = System.Runtime.CompilerServices.Unsafe.ReadUnaligned<T>(ref RawData[off]);
+            off += elemSize;
+        }
+        return result;
+    }
+
+    /// <summary>Get all non-hidden members as a dictionary of name → formatted value string.</summary>
+    public Dictionary<string, string> ToDictionary()
+    {
+        var result = new Dictionary<string, string>();
+        foreach (var m in Template.Members)
+        {
+            // Skip hidden host bytes (ZZZZZZZZZZ prefix)
+            if (m.Name.StartsWith("ZZZZZZZZZZ") || m.Name.StartsWith("__") || string.IsNullOrEmpty(m.Name))
+                continue;
+
+            try
+            {
+                string value = FormatMember(m);
+                result[m.Name] = value;
+            }
+            catch
+            {
+                result[m.Name] = "?";
+            }
+        }
+        return result;
+    }
+
+    private string FormatMember(TemplateMemberDetail m)
+    {
+        int off = (int)m.Offset;
+        if (off >= RawData.Length) return "?";
+
+        // BOOL — bit within host byte
+        if (m.DataType == 0x00C1)
+        {
+            byte host = RawData[off];
+            bool val = (host & (1 << m.Info)) != 0;
+            return val ? "True" : "False";
+        }
+
+        // Atomic types
+        ushort baseType = (ushort)(m.DataType & 0x00FF);
+        if (!m.IsArray && (m.DataType & 0xFF00) == 0)
+        {
+            return baseType switch
+            {
+                0xC2 => ((sbyte)RawData[off]).ToString(),
+                0xC3 => BinaryPrimitives.ReadInt16LittleEndian(RawData.AsSpan(off)).ToString(),
+                0xC4 => BinaryPrimitives.ReadInt32LittleEndian(RawData.AsSpan(off)).ToString(),
+                0xC5 => BinaryPrimitives.ReadInt64LittleEndian(RawData.AsSpan(off)).ToString(),
+                0xCA => BinaryPrimitives.ReadSingleLittleEndian(RawData.AsSpan(off)).ToString("G"),
+                0xCB => BinaryPrimitives.ReadDoubleLittleEndian(RawData.AsSpan(off)).ToString("G"),
+                _ => $"0x{baseType:X2}@{off}",
+            };
+        }
+
+        // Array of atomics
+        if (m.IsArray && (m.DataType & 0xE000) == 0x2000)
+        {
+            int count = Math.Min(m.ArraySize, 4); // Show first 4
+            var vals = new List<string>();
+            int elemSize = LogixDataTypes.GetElementSize((ushort)(m.DataType & 0x00FF));
+            if (elemSize <= 0) return $"[{m.ArraySize}]";
+            for (int i = 0; i < count && off + elemSize <= RawData.Length; i++)
+            {
+                int v = elemSize switch
+                {
+                    1 => RawData[off],
+                    2 => BinaryPrimitives.ReadInt16LittleEndian(RawData.AsSpan(off)),
+                    4 => BinaryPrimitives.ReadInt32LittleEndian(RawData.AsSpan(off)),
+                    _ => 0,
+                };
+                vals.Add(v.ToString());
+                off += elemSize;
+            }
+            string suffix = m.ArraySize > 4 ? ", ..." : "";
+            return $"[{string.Join(", ", vals)}{suffix}]";
+        }
+
+        // Nested struct — show as [struct@offset]
+        if ((m.DataType & 0x8000) != 0)
+            return $"[struct@{off}]";
+
+        return $"0x{m.DataType:X4}@{off}";
     }
 }

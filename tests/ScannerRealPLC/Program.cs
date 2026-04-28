@@ -1,44 +1,34 @@
-using System.Buffers.Binary;
 using EipSim.Logix;
 
-Console.WriteLine("=== Multi-Tag Read/Write ===");
+Console.WriteLine("=== Read Entire UDT ===");
 
 await using var client = new TagClient("192.168.204.128");
 await client.ConnectAsync();
 
-// --- Multi Read ---
-Console.WriteLine("=== Read Multiple ===");
-var values = await client.ReadMultipleAsync(["ADint", "AReal", "AString"]);
-foreach (var (name, raw) in values)
-{
-    ushort tagType = BitConverter.ToUInt16(raw, 0);
-    if (tagType == 0x00C4) // DINT
-        Console.WriteLine($"  {name} = {BitConverter.ToInt32(raw, 2)} (DINT)");
-    else if (tagType == 0x00CA) // REAL
-        Console.WriteLine($"  {name} = {BitConverter.ToSingle(raw, 2)} (REAL)");
-    else // structure (STRING etc)
-        Console.WriteLine($"  {name} = [{raw.Length - 2} bytes] (type=0x{tagType:X4})");
-}
+// Browse to get templates
+var browse = await client.BrowseTagsAsync();
 
-// --- Multi Write ---
-Console.WriteLine("\n=== Write Multiple ===");
-var writeResults = await client.WriteMultipleAsync([
-    ("ADint", LogixDataTypes.DINT, BitConverter.GetBytes(42)),
-    ("AReal", LogixDataTypes.REAL, BitConverter.GetBytes(9.81f)),
-]);
-foreach (var (name, ok) in writeResults)
-    Console.WriteLine($"  {name}: {(ok ? "OK" : "FAILED")}");
+// Read CMoFramework
+var fwTag = browse.Tags.First(t => t.Name.Contains("Framework"));
+Console.WriteLine($"Tag: {fwTag.Name}");
+Console.WriteLine($"Template: {fwTag.Template!.Name} ({fwTag.Template.StructureSize} bytes)\n");
 
-// --- Verify ---
-Console.WriteLine("\n=== Verify ===");
-var verify = await client.ReadMultipleAsync(["ADint", "AReal"]);
-foreach (var (name, raw) in verify)
-{
-    ushort tagType = BitConverter.ToUInt16(raw, 0);
-    if (tagType == 0x00C4)
-        Console.WriteLine($"  {name} = {BitConverter.ToInt32(raw, 2)}");
-    else if (tagType == 0x00CA)
-        Console.WriteLine($"  {name} = {BitConverter.ToSingle(raw, 2)}");
-}
+var value = await client.ReadStructAsync(fwTag.Name, fwTag.Template);
+
+// Show all members as a dictionary
+Console.WriteLine("=== All Members ===");
+foreach (var (name, val) in value.ToDictionary())
+    Console.WriteLine($"  {name} = {val}");
+
+// Typed access
+Console.WriteLine("\n=== Typed Access ===");
+Console.WriteLine($"  Tick100ms = {value.GetBool("Tick100ms")}");
+Console.WriteLine($"  Tick1s = {value.GetBool("Tick1s")}");
+Console.WriteLine($"  AlwaysTrue = {value.GetBool("AlwaysTrue")}");
+Console.WriteLine($"  AlwaysFalse = {value.GetBool("AlwaysFalse")}");
+Console.WriteLine($"  ApplicationCount = {value.Get<int>("ApplicationCount")}");
+Console.WriteLine($"  Random = {value.Get<float>("Random")}");
+Console.WriteLine($"  CycleTime = {value.Get<float>("CycleTime")}");
+Console.WriteLine($"  InhibitAlarmGroups = [{string.Join(", ", value.GetArray<int>("InhibitAlarmGroups"))}]");
 
 Console.WriteLine("\nDone.");
