@@ -107,27 +107,95 @@ public sealed class TagClient : IAsyncDisposable
     }
 
     /// <summary>
-    /// Browse all tags and resolve structure templates.
+    /// Browse all tags (controller-scope and program-scope) and resolve structure templates.
     /// Returns a TagBrowseResult containing all tags and their template definitions.
-    /// Structure templates are automatically fetched for any struct tags found.
+    /// Automatically discovers programs and browses their tags.
     /// </summary>
     public async Task<TagBrowseResult> BrowseTagsAsync(CancellationToken ct = default)
     {
-        // Step 1: Enumerate all symbol instances
+        // Step 1: Browse controller-scope tags
+        var tags = await BrowseSymbolsAsync(null, ct);
+
+        // Step 2: Find programs and browse their tags
+        var programs = tags
+            .Where(t => t.Name.StartsWith("Program:") && !t.Name.Contains('.'))
+            .Select(t => t.Name)
+            .ToList();
+
+        foreach (var program in programs)
+        {
+            var programTags = await BrowseSymbolsAsync(program, ct);
+            // Prefix program-scope tag names with the program name
+            foreach (var t in programTags)
+                t.Name = $"{program}.{t.Name}";
+            tags.AddRange(programTags);
+        }
+
+        // Step 3: Fetch templates for all struct tags
+        var templates = new Dictionary<ushort, TemplateInfo>();
+        var templateIds = tags
+            .Where(t => t.IsStruct)
+            .Select(t => t.TypeCode)
+            .Distinct()
+            .ToList();
+
+        foreach (var templateId in templateIds)
+        {
+            try
+            {
+                var template = await ReadTemplateAsync(templateId, ct);
+                templates[templateId] = template;
+            }
+            catch { } // Skip templates we can't read
+        }
+
+        // Link templates to tags
+        foreach (var tag in tags)
+        {
+            if (tag.IsStruct && templates.TryGetValue(tag.TypeCode, out var tmpl))
+                tag.Template = tmpl;
+        }
+
+        return new TagBrowseResult { Tags = tags, Templates = templates };
+    }
+
+    /// <summary>
+    /// Browse symbol instances for a given scope.
+    /// Pass null for controller-scope, or "Program:MainProgram" for program-scope.
+    /// </summary>
+    private async Task<List<TagInfo>> BrowseSymbolsAsync(string? program, CancellationToken ct)
+    {
         var tags = new List<TagInfo>();
         uint startInstance = 0;
 
+        // Build prefix path for program scope: symbolic segment "Program:XYZ"
+        byte[] programPrefix = [];
+        if (program != null)
+        {
+            var progBytes = Encoding.ASCII.GetBytes(program);
+            int padded = progBytes.Length % 2 != 0 ? progBytes.Length + 1 : progBytes.Length;
+            programPrefix = new byte[2 + padded];
+            programPrefix[0] = 0x91;
+            programPrefix[1] = (byte)progBytes.Length;
+            progBytes.CopyTo(programPrefix, 2);
+        }
+
         while (true)
         {
-            var path = new byte[6];
-            path[0] = 0x20; path[1] = 0x6B;
-            path[2] = 0x25; path[3] = 0x00;
-            BinaryPrimitives.WriteUInt16LittleEndian(path.AsSpan(4), (ushort)startInstance);
+            // Path: [optional program prefix] + Class 0x6B + Instance (16-bit)
+            var classInstPath = new byte[6];
+            classInstPath[0] = 0x20; classInstPath[1] = 0x6B;
+            classInstPath[2] = 0x25; classInstPath[3] = 0x00;
+            BinaryPrimitives.WriteUInt16LittleEndian(classInstPath.AsSpan(4), (ushort)startInstance);
+
+            var path = new byte[programPrefix.Length + classInstPath.Length];
+            programPrefix.CopyTo(path, 0);
+            classInstPath.CopyTo(path, programPrefix.Length);
 
             var reqData = new byte[6];
             BinaryPrimitives.WriteUInt16LittleEndian(reqData, 2);
-            BinaryPrimitives.WriteUInt16LittleEndian(reqData.AsSpan(2), 1);
-            BinaryPrimitives.WriteUInt16LittleEndian(reqData.AsSpan(4), 2);
+            BinaryPrimitives.WriteUInt16LittleEndian(reqData.AsSpan(2), 1); // attr 1 (name)
+            BinaryPrimitives.WriteUInt16LittleEndian(reqData.AsSpan(4), 2); // attr 2 (type)
 
             var (status, data) = await SendCipWithStatusAsync(0x55, path, reqData, ct);
 
@@ -159,32 +227,7 @@ public sealed class TagClient : IAsyncDisposable
             startInstance++;
         }
 
-        // Step 2: Fetch templates for all struct tags
-        var templates = new Dictionary<ushort, TemplateInfo>();
-        var templateIds = tags
-            .Where(t => t.IsStruct)
-            .Select(t => t.TypeCode)
-            .Distinct()
-            .ToList();
-
-        foreach (var templateId in templateIds)
-        {
-            try
-            {
-                var template = await ReadTemplateAsync(templateId, ct);
-                templates[templateId] = template;
-            }
-            catch { } // Skip templates we can't read
-        }
-
-        // Link templates to tags
-        foreach (var tag in tags)
-        {
-            if (tag.IsStruct && templates.TryGetValue(tag.TypeCode, out var tmpl))
-                tag.Template = tmpl;
-        }
-
-        return new TagBrowseResult { Tags = tags, Templates = templates };
+        return tags;
     }
 
     /// <summary>
@@ -246,12 +289,12 @@ public sealed class TagClient : IAsyncDisposable
         {
             var readReqData = new byte[6];
             BinaryPrimitives.WriteUInt32LittleEndian(readReqData, readOffset);
-            BinaryPrimitives.WriteUInt16LittleEndian(readReqData.AsSpan(4), (ushort)Math.Min(readSize - (int)readOffset, 480));
+            int remaining = readSize - (int)readOffset;
+            BinaryPrimitives.WriteUInt16LittleEndian(readReqData.AsSpan(4), (ushort)Math.Min(remaining, ushort.MaxValue));
 
             var (readStatus, readData) = await SendCipWithStatusAsync(0x4C, attrPath, readReqData, ct);
 
             if (readStatus != 0x00 && readStatus != 0x06) break;
-
             allDefData.AddRange(readData);
             readOffset += (uint)readData.Length;
 
@@ -496,8 +539,8 @@ public sealed class TagBrowseResult
 /// <summary>Information about a single tag from the Symbol Object.</summary>
 public sealed class TagInfo
 {
-    /// <summary>Tag name as it appears in the controller.</summary>
-    public string Name { get; init; } = "";
+    /// <summary>Tag name as it appears in the controller. Prefixed with program name for program-scope tags.</summary>
+    public string Name { get; set; } = "";
 
     /// <summary>Symbol Object instance ID.</summary>
     public uint InstanceId { get; init; }
