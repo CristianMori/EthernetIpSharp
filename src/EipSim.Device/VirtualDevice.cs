@@ -87,6 +87,9 @@ public sealed class VirtualDevice : IAsyncDisposable
             return asm?.DataSize ?? -1;
         };
 
+        // Wire up Unconnected Send — dispatch inner requests through the same dispatcher
+        ConnectionManager.DispatchRequest = (svc, path, data) => Dispatcher.Dispatch(svc, path, data);
+
         Dispatcher.RegisterClass(IdentityObject.Create(identity));
         Dispatcher.RegisterClass(TcpIpInterfaceObject.Create(bindAddress));
         Dispatcher.RegisterClass(EthernetLinkObject.Create());

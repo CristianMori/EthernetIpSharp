@@ -24,6 +24,9 @@ public sealed class ConnectionManagerObject
     /// <summary>Service code for Large Forward Open.</summary>
     public const byte LargeForwardOpenService = 0x5B;
 
+    /// <summary>Service code for Unconnected Send.</summary>
+    public const byte UnconnectedSendService = 0x52;
+
     private readonly CipClass _cipClass;
 
     /// <summary>Active connections keyed by O→T connection ID (used for incoming UDP lookup).</summary>
@@ -44,6 +47,12 @@ public sealed class ConnectionManagerObject
     /// Set by VirtualDevice to wire up assembly validation.
     /// </summary>
     public Func<uint, int>? ValidateAssembly { get; set; }
+
+    /// <summary>
+    /// Delegate to dispatch an inner CIP request (used by Unconnected Send).
+    /// Set by VirtualDevice or LogixDispatcher to route the unwrapped request.
+    /// </summary>
+    public Func<byte, CipPath, ReadOnlyMemory<byte>, CipServiceResponse>? DispatchRequest { get; set; }
 
     /// <summary>The CIP class object for registration in the dispatcher.</summary>
     public CipClass CipClass => _cipClass;
@@ -69,6 +78,7 @@ public sealed class ConnectionManagerObject
         _cipClass.AddInstanceService(new CipServiceDefinition(ForwardOpenService, "Forward_Open", HandleForwardOpen));
         _cipClass.AddInstanceService(new CipServiceDefinition(ForwardCloseService, "Forward_Close", HandleForwardClose));
         _cipClass.AddInstanceService(new CipServiceDefinition(LargeForwardOpenService, "Large_Forward_Open", HandleLargeForwardOpen));
+        _cipClass.AddInstanceService(new CipServiceDefinition(UnconnectedSendService, "Unconnected_Send", HandleUnconnectedSend));
     }
 
     /// <summary>Handle Forward Open (0x54) service request.</summary>
@@ -224,6 +234,37 @@ public sealed class ConnectionManagerObject
     {
         connection.State = ConnectionState.TimedOut;
         RemoveConnection(connection);
+    }
+
+    /// <summary>
+    /// Handle Unconnected Send (0x52) — unwrap the embedded CIP request and dispatch it.
+    /// Format: priority(1) + timeout(1) + msg_length(UINT) + embedded_MR_request + [pad] + route_path_size(1) + reserved(1) + route_path
+    /// </summary>
+    private CipServiceResponse HandleUnconnectedSend(CipInstance instance, CipServiceRequest request)
+    {
+        if (DispatchRequest == null)
+            return CipServiceResponse.Error(request.ServiceCode, CipStatus.Error(CipStatus.ServiceNotSupported));
+
+        if (request.Data.Length < 4)
+            return CipServiceResponse.Error(request.ServiceCode, CipStatus.Error(CipStatus.NotEnoughData));
+
+        var span = request.Data.Span;
+        // Skip priority/time_tick (1) + timeout_ticks (1)
+        int offset = 2;
+        ushort msgLength = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(offset)); offset += 2;
+
+        if (offset + msgLength > request.Data.Length)
+            return CipServiceResponse.Error(request.ServiceCode, CipStatus.Error(CipStatus.NotEnoughData));
+
+        // Extract the embedded MR request
+        var embeddedRequest = request.Data.Slice(offset, msgLength);
+
+        // Parse the embedded MR request
+        if (!MrCodec.TryParseRequest(embeddedRequest, out var serviceCode, out var path, out var data))
+            return CipServiceResponse.Error(request.ServiceCode, CipStatus.Error(CipStatus.PathSegmentError));
+
+        // Dispatch the inner request through the full CIP dispatch chain
+        return DispatchRequest(serviceCode, path, data);
     }
 
     /// <summary>Build a Forward Open error response with general status 0x01 and the given extended status.</summary>

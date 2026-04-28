@@ -23,7 +23,10 @@ public class LogixDispatcher : CipDispatcher
     public LogixDispatcher() : this(new TagDatabase()) { }
 
     /// <summary>DI constructor — inject a custom tag database (or mock).</summary>
-    public LogixDispatcher(ITagDatabase tags)
+    public LogixDispatcher(ITagDatabase tags) : this(tags, null) { }
+
+    /// <summary>Full constructor — inject tag database and optional device identity.</summary>
+    public LogixDispatcher(ITagDatabase tags, IdentityInfo? identity)
     {
         Tags = tags;
         _symbolObject = new SymbolObject(tags);
@@ -32,6 +35,7 @@ public class LogixDispatcher : CipDispatcher
         RegisterClass(_symbolObject.CipClass);
         RegisterClass(_templateObject.CipClass);
 
+        // Message Router with Multiple Service Packet
         var messageRouter = new CipClass(0x02, "Message Router", revision: 1);
         messageRouter.AddStandardInstanceServices();
         messageRouter.CreateInstance(1);
@@ -39,6 +43,27 @@ public class LogixDispatcher : CipDispatcher
             MultiServiceHandler.ServiceCode, "Multiple_Service_Packet",
             (inst, req) => MultiServiceHandler.Handle(this, req)));
         RegisterClass(messageRouter);
+
+        // Connection Manager with Unconnected Send support
+        var connMgr = new EipSim.Connections.ConnectionManagerObject();
+        connMgr.DispatchRequest = (svc, path, data) => Dispatch(svc, path, data);
+        RegisterClass(connMgr.CipClass);
+
+        // Identity object (required for get_plc_info / Unconnected Send to Identity)
+        if (identity != null)
+        {
+            var idClass = new CipClass(IdentityInfo.ClassCode, "Identity", revision: 1);
+            idClass.AddStandardInstanceServices();
+            var idInst = idClass.CreateInstance(1);
+            idInst.AddAttribute(CipAttribute.Create(1, CipDataType.Uint, AttributeAccess.GetSingle | AttributeAccess.GetAll, identity.VendorId));
+            idInst.AddAttribute(CipAttribute.Create(2, CipDataType.Uint, AttributeAccess.GetSingle | AttributeAccess.GetAll, identity.DeviceType));
+            idInst.AddAttribute(CipAttribute.Create(3, CipDataType.Uint, AttributeAccess.GetSingle | AttributeAccess.GetAll, identity.ProductCode));
+            idInst.AddAttribute(new CipAttribute(4, CipDataType.Usint, AttributeAccess.GetSingle | AttributeAccess.GetAll, [identity.MajorRevision, identity.MinorRevision]));
+            idInst.AddAttribute(CipAttribute.Create(5, CipDataType.Word, AttributeAccess.GetSingle | AttributeAccess.GetAll, identity.Status));
+            idInst.AddAttribute(CipAttribute.Create(6, CipDataType.Udint, AttributeAccess.GetSingle | AttributeAccess.GetAll, identity.SerialNumber));
+            idInst.AddAttribute(CipAttribute.CreateShortString(7, AttributeAccess.GetSingle | AttributeAccess.GetAll, identity.ProductName));
+            RegisterClass(idClass);
+        }
 
         // Auto-register CIP instances when tags/templates are added
         tags.TagAdded += OnTagAdded;

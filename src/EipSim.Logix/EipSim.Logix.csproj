@@ -2,6 +2,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\EipSim.Cip\EipSim.Cip.csproj" />
+    <ProjectReference Include="..\EipSim.Connections\EipSim.Connections.csproj" />
   </ItemGroup>
 
   <PropertyGroup>
