@@ -133,7 +133,8 @@ await conn.CloseAsync();
 ## Compatibility
 
 - Works with real Allen-Bradley ControlLogix and CompactLogix PLCs
-- Compatible with standard EtherNet/IP clients (pycomm3, libplctag, RSLinx)
+- Tested with pycomm3 (Python) — tag read/write via Unconnected Send
+- Compatible with standard EtherNet/IP clients
 - Supports Class 1 transport with run/idle header handling
 
 ## CIP services supported
