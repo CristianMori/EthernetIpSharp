@@ -77,6 +77,31 @@ public sealed class TagClient : IAsyncDisposable
         return new StructureValue(template, structData);
     }
 
+    /// <summary>Read a structure tag directly into a generated IUdtStructure type.</summary>
+    public async Task<T> ReadStructAsync<T>(string tagName, CancellationToken ct = default)
+        where T : IUdtStructure, new()
+    {
+        var raw = await ReadTagRawAsync(tagName, 1, ct);
+        const int headerSize = 4;
+        var structData = raw.Length > headerSize ? raw[headerSize..] : [];
+        var result = new T();
+        result.FromBytes(structData);
+        return result;
+    }
+
+    /// <summary>Write a StructureValue to a tag.</summary>
+    public async Task WriteStructValueAsync(string tagName, StructureValue value, CancellationToken ct = default)
+    {
+        await WriteStructAsync(tagName, value.Template.StructureHandle, 1, value.ToBytes(), ct);
+    }
+
+    /// <summary>Write a generated IUdtStructure to a tag.</summary>
+    public async Task WriteStructAsync<T>(string tagName, T value, CancellationToken ct = default)
+        where T : IUdtStructure
+    {
+        await WriteStructAsync(tagName, value.StructureHandle, 1, value.ToBytes(), ct);
+    }
+
     /// <summary>Read a tag and return the raw response (tag_type + data bytes).</summary>
     public async Task<byte[]> ReadTagRawAsync(string tagName, ushort elementCount = 1, CancellationToken ct = default)
     {
@@ -859,22 +884,35 @@ public sealed class TemplateMemberDetail
 }
 
 /// <summary>
-/// A parsed structure value — provides named access to individual members
+/// A read/write structure value — provides named access to individual members
 /// from a raw structure byte blob using the template definition.
+/// Use for reading: populate via constructor with data from PLC.
+/// Use for writing: create empty, set members, call ToBytes().
 /// </summary>
 public sealed class StructureValue
 {
     /// <summary>The template that describes this structure's layout.</summary>
     public TemplateInfo Template { get; }
 
-    /// <summary>Raw structure data bytes.</summary>
+    /// <summary>Raw structure data bytes (mutable — writes modify this directly).</summary>
     public byte[] RawData { get; }
 
+    /// <summary>Create from PLC data (for reading).</summary>
     public StructureValue(TemplateInfo template, byte[] rawData)
     {
         Template = template;
         RawData = rawData;
     }
+
+    /// <summary>Create an empty structure (for writing). Allocates a zeroed buffer.</summary>
+    public StructureValue(TemplateInfo template)
+    {
+        Template = template;
+        RawData = new byte[template.StructureSize];
+    }
+
+    /// <summary>Get the raw bytes for writing to the PLC.</summary>
+    public byte[] ToBytes() => RawData;
 
     /// <summary>Get a member by name. Returns null if not found.</summary>
     public TemplateMemberDetail? GetMember(string name) =>
@@ -943,6 +981,66 @@ public sealed class StructureValue
             off += elemSize;
         }
         return result;
+    }
+
+    // --- Writers ---
+
+    /// <summary>Write a typed value to a named member.</summary>
+    public void Set<T>(string memberName, T value) where T : unmanaged
+    {
+        var member = GetMember(memberName)
+            ?? throw new KeyNotFoundException($"Member '{memberName}' not found in {Template.Name}");
+
+        System.Runtime.CompilerServices.Unsafe.WriteUnaligned(ref RawData[(int)member.Offset], value);
+    }
+
+    /// <summary>Write a BOOL member (set/clear a bit within the SINT host byte).</summary>
+    public void SetBool(string memberName, bool value)
+    {
+        var member = GetMember(memberName)
+            ?? throw new KeyNotFoundException($"Member '{memberName}' not found in {Template.Name}");
+
+        if (member.DataType != 0x00C1)
+            throw new InvalidOperationException($"Member '{memberName}' is not BOOL");
+
+        int off = (int)member.Offset;
+        int bit = member.Info;
+        if (value)
+            RawData[off] |= (byte)(1 << bit);
+        else
+            RawData[off] &= (byte)~(1 << bit);
+    }
+
+    /// <summary>Write a STRING member (Logix STRING structure at the given offset).</summary>
+    public void SetString(string memberName, string value)
+    {
+        var member = GetMember(memberName)
+            ?? throw new KeyNotFoundException($"Member '{memberName}' not found in {Template.Name}");
+
+        int off = (int)member.Offset;
+        var strBytes = Encoding.ASCII.GetBytes(value);
+        int len = Math.Min(strBytes.Length, LogixDataTypes.StringMaxLength);
+        BinaryPrimitives.WriteInt32LittleEndian(RawData.AsSpan(off), len);
+        RawData.AsSpan(off + LogixDataTypes.StringDataOffset, LogixDataTypes.StringMaxLength).Clear();
+        strBytes.AsSpan(0, len).CopyTo(RawData.AsSpan(off + LogixDataTypes.StringDataOffset));
+    }
+
+    /// <summary>Write an array of typed values to a named member.</summary>
+    public void SetArray<T>(string memberName, T[] values) where T : unmanaged
+    {
+        var member = GetMember(memberName)
+            ?? throw new KeyNotFoundException($"Member '{memberName}' not found in {Template.Name}");
+
+        int elemSize;
+        unsafe { elemSize = sizeof(T); }
+        int off = (int)member.Offset;
+        int count = Math.Min(values.Length, member.IsArray ? member.ArraySize : values.Length);
+
+        for (int i = 0; i < count && off + elemSize <= RawData.Length; i++)
+        {
+            System.Runtime.CompilerServices.Unsafe.WriteUnaligned(ref RawData[off], values[i]);
+            off += elemSize;
+        }
     }
 
     /// <summary>Get all non-hidden members as a dictionary of name → formatted value string.</summary>
