@@ -107,32 +107,32 @@ public sealed class TagClient : IAsyncDisposable
     }
 
     /// <summary>
-    /// Browse all tags by iterating Get_Instance_Attribute_List on Symbol class 0x6B.
-    /// Returns a list of (name, symbolType) pairs.
+    /// Browse all tags and resolve structure templates.
+    /// Returns a TagBrowseResult containing all tags and their template definitions.
+    /// Structure templates are automatically fetched for any struct tags found.
     /// </summary>
-    public async Task<List<(string Name, ushort SymbolType)>> BrowseTagsAsync(CancellationToken ct = default)
+    public async Task<TagBrowseResult> BrowseTagsAsync(CancellationToken ct = default)
     {
-        var result = new List<(string, ushort)>();
+        // Step 1: Enumerate all symbol instances
+        var tags = new List<TagInfo>();
         uint startInstance = 0;
 
         while (true)
         {
             var path = new byte[6];
-            path[0] = 0x20; path[1] = 0x6B; // Class 0x6B (Symbol)
-            path[2] = 0x25; path[3] = 0x00; // 16-bit instance
+            path[0] = 0x20; path[1] = 0x6B;
+            path[2] = 0x25; path[3] = 0x00;
             BinaryPrimitives.WriteUInt16LittleEndian(path.AsSpan(4), (ushort)startInstance);
 
             var reqData = new byte[6];
-            BinaryPrimitives.WriteUInt16LittleEndian(reqData, 2);       // 2 attributes
-            BinaryPrimitives.WriteUInt16LittleEndian(reqData.AsSpan(2), 1); // attr 1 (name)
-            BinaryPrimitives.WriteUInt16LittleEndian(reqData.AsSpan(4), 2); // attr 2 (type)
+            BinaryPrimitives.WriteUInt16LittleEndian(reqData, 2);
+            BinaryPrimitives.WriteUInt16LittleEndian(reqData.AsSpan(2), 1);
+            BinaryPrimitives.WriteUInt16LittleEndian(reqData.AsSpan(4), 2);
 
             var (status, data) = await SendCipWithStatusAsync(0x55, path, reqData, ct);
 
-            if (status != 0x00 && status != 0x06)
-                break; // Error other than "more data"
+            if (status != 0x00 && status != 0x06) break;
 
-            // Parse entries: [instance_id(4) + name_len(2) + name + symbol_type(2)]...
             int off = 0;
             while (off + 6 < data.Length)
             {
@@ -142,15 +142,168 @@ public sealed class TagClient : IAsyncDisposable
                 string name = Encoding.ASCII.GetString(data, off, nameLen); off += nameLen;
                 ushort symType = BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan(off)); off += 2;
 
-                result.Add((name, symType));
+                tags.Add(new TagInfo
+                {
+                    Name = name,
+                    InstanceId = instId,
+                    SymbolType = symType,
+                    IsStruct = (symType & 0x8000) != 0,
+                    IsSystem = (symType & 0x1000) != 0,
+                    ArrayDimensions = (symType >> 13) & 0x03,
+                    TypeCode = (ushort)(symType & 0x0FFF),
+                });
                 startInstance = instId;
             }
 
-            if (status == 0x00) break; // All done
+            if (status == 0x00) break;
             startInstance++;
         }
 
-        return result;
+        // Step 2: Fetch templates for all struct tags
+        var templates = new Dictionary<ushort, TemplateInfo>();
+        var templateIds = tags
+            .Where(t => t.IsStruct)
+            .Select(t => t.TypeCode)
+            .Distinct()
+            .ToList();
+
+        foreach (var templateId in templateIds)
+        {
+            try
+            {
+                var template = await ReadTemplateAsync(templateId, ct);
+                templates[templateId] = template;
+            }
+            catch { } // Skip templates we can't read
+        }
+
+        // Link templates to tags
+        foreach (var tag in tags)
+        {
+            if (tag.IsStruct && templates.TryGetValue(tag.TypeCode, out var tmpl))
+                tag.Template = tmpl;
+        }
+
+        return new TagBrowseResult { Tags = tags, Templates = templates };
+    }
+
+    /// <summary>
+    /// Read a template definition from the controller.
+    /// Fetches attributes (handle, member count, sizes) then reads the member info and names.
+    /// </summary>
+    public async Task<TemplateInfo> ReadTemplateAsync(ushort templateInstanceId, CancellationToken ct = default)
+    {
+        // Step 1: Get template attributes (1=handle, 2=member_count, 4=def_size, 5=struct_size)
+        var attrPath = new byte[6];
+        attrPath[0] = 0x20; attrPath[1] = 0x6C; // Class 0x6C (Template)
+        attrPath[2] = 0x25; attrPath[3] = 0x00;
+        BinaryPrimitives.WriteUInt16LittleEndian(attrPath.AsSpan(4), templateInstanceId);
+
+        var attrReqData = new byte[10];
+        BinaryPrimitives.WriteUInt16LittleEndian(attrReqData, 4); // 4 attributes
+        BinaryPrimitives.WriteUInt16LittleEndian(attrReqData.AsSpan(2), 1); // handle
+        BinaryPrimitives.WriteUInt16LittleEndian(attrReqData.AsSpan(4), 2); // member count
+        BinaryPrimitives.WriteUInt16LittleEndian(attrReqData.AsSpan(6), 4); // definition size
+        BinaryPrimitives.WriteUInt16LittleEndian(attrReqData.AsSpan(8), 5); // structure size
+
+        var attrData = await SendCipAsync(0x03, attrPath, attrReqData, ct);
+
+        // Parse: count(2) + [attr_id(2) + status(2) + data]...
+        int off = 2; // skip count
+        ushort structHandle = 0;
+        ushort memberCount = 0;
+        uint definitionSize = 0;
+        uint structureSize = 0;
+
+        for (int i = 0; i < 4 && off + 4 <= attrData.Length; i++)
+        {
+            ushort attrId = BinaryPrimitives.ReadUInt16LittleEndian(attrData.AsSpan(off)); off += 2;
+            ushort attrStatus = BinaryPrimitives.ReadUInt16LittleEndian(attrData.AsSpan(off)); off += 2;
+            if (attrStatus != 0) continue;
+
+            switch (attrId)
+            {
+                case 1: structHandle = BinaryPrimitives.ReadUInt16LittleEndian(attrData.AsSpan(off)); off += 2; break;
+                case 2: memberCount = BinaryPrimitives.ReadUInt16LittleEndian(attrData.AsSpan(off)); off += 2; break;
+                case 4: definitionSize = BinaryPrimitives.ReadUInt32LittleEndian(attrData.AsSpan(off)); off += 4; break;
+                case 5: structureSize = BinaryPrimitives.ReadUInt32LittleEndian(attrData.AsSpan(off)); off += 4; break;
+            }
+        }
+
+        // Step 2: Template Read (0x4C) — get member info + names
+        // Read size = (definitionSize * 4) - 23 per spec
+        int readSize = (int)(definitionSize * 4) - 23;
+        if (readSize <= 0) readSize = 256;
+
+        var members = new List<TemplateMemberDetail>();
+        string templateName = "";
+
+        // Read with fragmentation
+        var allDefData = new List<byte>();
+        uint readOffset = 0;
+
+        while (true)
+        {
+            var readReqData = new byte[6];
+            BinaryPrimitives.WriteUInt32LittleEndian(readReqData, readOffset);
+            BinaryPrimitives.WriteUInt16LittleEndian(readReqData.AsSpan(4), (ushort)Math.Min(readSize - (int)readOffset, 480));
+
+            var (readStatus, readData) = await SendCipWithStatusAsync(0x4C, attrPath, readReqData, ct);
+
+            if (readStatus != 0x00 && readStatus != 0x06) break;
+
+            allDefData.AddRange(readData);
+            readOffset += (uint)readData.Length;
+
+            if (readStatus == 0x00) break;
+        }
+
+        var defBytes = allDefData.ToArray();
+
+        // Parse member info: memberCount * 8 bytes, then null-terminated names
+        off = 0;
+        for (int i = 0; i < memberCount && off + 8 <= defBytes.Length; i++)
+        {
+            uint typeAndInfo = BinaryPrimitives.ReadUInt32LittleEndian(defBytes.AsSpan(off)); off += 4;
+            uint memberOffset = BinaryPrimitives.ReadUInt32LittleEndian(defBytes.AsSpan(off)); off += 4;
+
+            ushort memberType = (ushort)(typeAndInfo >> 16);
+            ushort memberInfo = (ushort)(typeAndInfo & 0xFFFF);
+
+            members.Add(new TemplateMemberDetail
+            {
+                DataType = memberType,
+                Info = memberInfo, // array size or bit position
+                Offset = memberOffset,
+            });
+        }
+
+        // Parse names: template name\0 then member names\0
+        int nameStart = off;
+        var names = new List<string>();
+        while (off < defBytes.Length)
+        {
+            int end = Array.IndexOf(defBytes, (byte)0, off);
+            if (end < 0) break;
+            if (end > off)
+                names.Add(Encoding.ASCII.GetString(defBytes, off, end - off));
+            off = end + 1;
+        }
+
+        if (names.Count > 0) templateName = names[0];
+        for (int i = 0; i < members.Count && i + 1 < names.Count; i++)
+            members[i].Name = names[i + 1];
+
+        return new TemplateInfo
+        {
+            InstanceId = templateInstanceId,
+            Name = templateName,
+            StructureHandle = structHandle,
+            MemberCount = memberCount,
+            DefinitionSize = definitionSize,
+            StructureSize = structureSize,
+            Members = members,
+        };
     }
 
     /// <summary>Unregister session and close TCP connection.</summary>
@@ -324,5 +477,105 @@ public sealed class TagClient : IAsyncDisposable
         if (typeof(T) == typeof(long) || typeof(T) == typeof(ulong)) return LogixDataTypes.LINT;
         if (typeof(T) == typeof(double)) return 0x00CB; // LREAL
         throw new NotSupportedException($"Cannot map {typeof(T).Name} to a Logix tag type");
+    }
+}
+
+/// <summary>Result of BrowseTagsAsync — all tags and their resolved templates.</summary>
+public sealed class TagBrowseResult
+{
+    /// <summary>All tags found in the controller.</summary>
+    public List<TagInfo> Tags { get; init; } = [];
+
+    /// <summary>All structure templates, keyed by template instance ID.</summary>
+    public Dictionary<ushort, TemplateInfo> Templates { get; init; } = [];
+
+    /// <summary>User tags only (excludes system tags and __ prefixed).</summary>
+    public IEnumerable<TagInfo> UserTags => Tags.Where(t => !t.IsSystem && !t.Name.StartsWith("__"));
+}
+
+/// <summary>Information about a single tag from the Symbol Object.</summary>
+public sealed class TagInfo
+{
+    /// <summary>Tag name as it appears in the controller.</summary>
+    public string Name { get; init; } = "";
+
+    /// <summary>Symbol Object instance ID.</summary>
+    public uint InstanceId { get; init; }
+
+    /// <summary>Raw SymbolType attribute value.</summary>
+    public ushort SymbolType { get; init; }
+
+    /// <summary>True if this is a structured data type.</summary>
+    public bool IsStruct { get; init; }
+
+    /// <summary>True if this is a system tag (bit 12 set).</summary>
+    public bool IsSystem { get; init; }
+
+    /// <summary>Array dimensions (0-3).</summary>
+    public int ArrayDimensions { get; init; }
+
+    /// <summary>For atomic: CIP type code. For struct: template instance ID.</summary>
+    public ushort TypeCode { get; init; }
+
+    /// <summary>Resolved template (null if atomic or template not found).</summary>
+    public TemplateInfo? Template { get; set; }
+
+    public override string ToString() =>
+        IsStruct ? $"{Name} (struct: {Template?.Name ?? $"template #{TypeCode}"})" : $"{Name} (0x{TypeCode:X4})";
+}
+
+/// <summary>Structure template definition read from Template Object (class 0x6C).</summary>
+public sealed class TemplateInfo
+{
+    /// <summary>Template Object instance ID.</summary>
+    public ushort InstanceId { get; init; }
+
+    /// <summary>Structure/UDT name.</summary>
+    public string Name { get; init; } = "";
+
+    /// <summary>Structure handle used as tag type parameter in Read/Write Tag.</summary>
+    public ushort StructureHandle { get; init; }
+
+    /// <summary>Number of members.</summary>
+    public ushort MemberCount { get; init; }
+
+    /// <summary>Template definition size in 32-bit words.</summary>
+    public uint DefinitionSize { get; init; }
+
+    /// <summary>Structure size in bytes when read/written on the wire.</summary>
+    public uint StructureSize { get; init; }
+
+    /// <summary>Member definitions with types, offsets, and names.</summary>
+    public List<TemplateMemberDetail> Members { get; init; } = [];
+
+    public override string ToString() => $"{Name} ({MemberCount} members, {StructureSize} bytes)";
+}
+
+/// <summary>A single member within a structure template.</summary>
+public sealed class TemplateMemberDetail
+{
+    /// <summary>Member name.</summary>
+    public string Name { get; set; } = "";
+
+    /// <summary>CIP data type code (upper 16 bits of the type_and_info field).</summary>
+    public ushort DataType { get; init; }
+
+    /// <summary>Info field: array size for arrays, bit position for BOOLs, 0 for scalars.</summary>
+    public ushort Info { get; init; }
+
+    /// <summary>Byte offset of this member within the structure.</summary>
+    public uint Offset { get; init; }
+
+    /// <summary>True if this member is an array (Info > 0 and not a BOOL bit).</summary>
+    public bool IsArray => Info > 0 && DataType != 0x00C1;
+
+    /// <summary>Array size (0 for scalars).</summary>
+    public int ArraySize => IsArray ? Info : 0;
+
+    public override string ToString()
+    {
+        string type = $"0x{DataType:X4}";
+        string arr = IsArray ? $"[{ArraySize}]" : "";
+        return $"{Name}: {type}{arr} @ offset {Offset}";
     }
 }
