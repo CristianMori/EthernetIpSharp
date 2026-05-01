@@ -6,3 +6,4 @@ obj/
 .vs/
 *.DotSettings.user
 /tools/ParsePcap/
+.claude/
