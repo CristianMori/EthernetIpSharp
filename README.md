@@ -1,4 +1,4 @@
-# EipSim — EtherNet/IP Device Simulator
+# EthernetIPSharp — EtherNet/IP Device Simulator
 
 A full CIP protocol stack in C# (.NET 8) that can simulate EtherNet/IP adapter devices and Logix PLC tag servers. Tested with real Allen-Bradley ControlLogix PLCs.
 
@@ -11,7 +11,7 @@ A full CIP protocol stack in C# (.NET 8) that can simulate EtherNet/IP adapter d
 ## Architecture
 
 ```
-EipSim.Cip           Pure CIP protocol — no I/O dependencies
+EthernetIPSharp.Cip           Pure CIP protocol — no I/O dependencies
   ICipDispatch        Central dispatch interface
   CipDispatcher       Routes requests through CIP object tree
   CipPath             EPATH parser (logical + symbolic segments)
@@ -19,21 +19,21 @@ EipSim.Cip           Pure CIP protocol — no I/O dependencies
   EncapsulationHeader 24-byte TCP framing codec
   CpfParser           Common Packet Format codec
 
-EipSim.Protocol       Transport layer — TCP and UDP sockets
+EthernetIPSharp.Protocol       Transport layer — TCP and UDP sockets
   EipAdapter          TCP 44818 listener (server/target side)
   EipScanner          TCP 44818 client (originator/scanner side)
   EipUdpTransport     UDP 2222 I/O data send/receive
 
-EipSim.Connections    Connection lifecycle
+EthernetIPSharp.Connections    Connection lifecycle
   ConnectionManager   Forward Open/Close, connection tracking
   ForwardOpenRequest  Binary parser for Forward Open parameters
   ConnectionPath      Assembly path extraction
 
-EipSim.Device         Virtual device composition
+EthernetIPSharp.Device         Virtual device composition
   VirtualDevice       Ties everything together — dispatcher, assemblies, I/O timers
   AssemblyObject      CIP Assembly (0x04) with byte buffer I/O
 
-EipSim.Logix          Logix PLC simulator
+EthernetIPSharp.Logix          Logix PLC simulator
   LogixDispatcher     CipDispatcher subclass with symbolic tag dispatch
   Tag                 Tag data object with ValueChanged events
   TagDatabase         In-memory tag store with change notifications
@@ -41,7 +41,7 @@ EipSim.Logix          Logix PLC simulator
   SymbolObject        Tag browsing via Get_Instance_Attribute_List
   TemplateObject      UDT structure definitions and Template Read
 
-EipSim.Host           Console test program
+EthernetIPSharp.Host           Console test program
 ```
 
 ## Quick start
@@ -166,16 +166,16 @@ dotnet test     # 79 tests
 
 ```
 src/
-  EipSim.Cip/          Core CIP protocol (no I/O dependencies)
-  EipSim.Protocol/     TCP/UDP transport (adapter + scanner)
-  EipSim.Connections/  Forward Open/Close, connection lifecycle
-  EipSim.Device/       Virtual device composition
-  EipSim.Logix/        Logix PLC tag simulator
-  EipSim.Host/         Console test program
+  EthernetIPSharp.Cip/          Core CIP protocol (no I/O dependencies)
+  EthernetIPSharp.Protocol/     TCP/UDP transport (adapter + scanner)
+  EthernetIPSharp.Connections/  Forward Open/Close, connection lifecycle
+  EthernetIPSharp.Device/       Virtual device composition
+  EthernetIPSharp.Logix/        Logix PLC tag simulator
+  EthernetIPSharp.Host/         Console test program
 
 tests/
-  EipSim.Protocol.Tests/   Encapsulation, Forward Open, scanner loopback tests
-  EipSim.Logix.Tests/      Tag read/write, addressing, edge cases, mock tests
+  EthernetIPSharp.Protocol.Tests/   Encapsulation, Forward Open, scanner loopback tests
+  EthernetIPSharp.Logix.Tests/      Tag read/write, addressing, edge cases, mock tests
 ```
 
 ## License

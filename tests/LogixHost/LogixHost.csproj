@@ -5,8 +5,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="..\..\src\EipSim.Logix\EipSim.Logix.csproj" />
-    <ProjectReference Include="..\..\src\EipSim.Protocol\EipSim.Protocol.csproj" />
-    <ProjectReference Include="..\..\src\EipSim.Cip\EipSim.Cip.csproj" />
+    <ProjectReference Include="..\..\src\EthernetIPSharp.Logix\EthernetIPSharp.Logix.csproj" />
+    <ProjectReference Include="..\..\src\EthernetIPSharp.Protocol\EthernetIPSharp.Protocol.csproj" />
+    <ProjectReference Include="..\..\src\EthernetIPSharp.Cip\EthernetIPSharp.Cip.csproj" />
   </ItemGroup>
 </Project>

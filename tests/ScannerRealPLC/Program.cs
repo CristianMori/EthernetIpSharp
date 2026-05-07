@@ -1,4 +1,4 @@
-using EipSim.Logix;
+using EthernetIPSharp.Logix;
 
 Console.WriteLine("=== Read AMix, Write, Read Back ===");
 

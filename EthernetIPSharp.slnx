@@ -1,0 +1,15 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/EthernetIPSharp.Cip/EthernetIPSharp.Cip.csproj" />
+    <Project Path="src/EthernetIPSharp.Connections/EthernetIPSharp.Connections.csproj" />
+    <Project Path="src/EthernetIPSharp.Device/EthernetIPSharp.Device.csproj" />
+    <Project Path="src/EthernetIPSharp.Host/EthernetIPSharp.Host.csproj" />
+    <Project Path="src/EthernetIPSharp.Logix/EthernetIPSharp.Logix.csproj" />
+    <Project Path="src/EthernetIPSharp.Protocol/EthernetIPSharp.Protocol.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/EthernetIPSharp.Cip.Tests/EthernetIPSharp.Cip.Tests.csproj" />
+    <Project Path="tests/EthernetIPSharp.Logix.Tests/EthernetIPSharp.Logix.Tests.csproj" />
+    <Project Path="tests/EthernetIPSharp.Protocol.Tests/EthernetIPSharp.Protocol.Tests.csproj" />
+  </Folder>
+</Solution>

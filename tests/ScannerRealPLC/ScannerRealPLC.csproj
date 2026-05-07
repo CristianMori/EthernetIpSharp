@@ -5,6 +5,6 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="..\..\src\EipSim.Logix\EipSim.Logix.csproj" />
+    <ProjectReference Include="..\..\src\EthernetIPSharp.Logix\EthernetIPSharp.Logix.csproj" />
   </ItemGroup>
 </Project>

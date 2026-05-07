@@ -2,9 +2,9 @@
 // Or compile as a standalone console app
 
 using System.Net;
-using EipSim.Cip;
-using EipSim.Logix;
-using EipSim.Protocol;
+using EthernetIPSharp.Cip;
+using EthernetIPSharp.Logix;
+using EthernetIPSharp.Protocol;
 
 var identity = new IdentityInfo
 {
@@ -14,7 +14,7 @@ var identity = new IdentityInfo
     MajorRevision = 32,
     MinorRevision = 11,
     SerialNumber = 0xDEAD,
-    ProductName = "EipSim Logix",
+    ProductName = "EthernetIPSharp Logix",
 };
 
 var logix = new LogixDispatcher(new TagDatabase(), identity);
