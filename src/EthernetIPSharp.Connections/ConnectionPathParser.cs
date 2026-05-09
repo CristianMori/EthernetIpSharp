@@ -44,8 +44,9 @@ public static class ConnectionPathParser
     /// </summary>
     public static ConnectionPathResult Parse(ReadOnlySpan<byte> path, ForwardOpenRequest request)
     {
-        // Strip FactoryTalk Logix Emulate wrapper if present.
-        // Logix Emulate wraps Forward Open paths with: Class 0x04FC (21 00 FC 04) + ConnPoint 0x01 (2C 01)
+        // Some originators prepend extra path segments (class 0x04FC + connection
+        // point 0x01) before the real connection path. Not sure why — strip them
+        // so the parser can find the actual assembly instances.
         if (path.Length >= 6 &&
             path[0] == 0x21 && path[1] == 0x00 &&
             path[2] == 0xFC && path[3] == 0x04 &&
