@@ -1,4 +1,4 @@
-# EthernetIPSharp — EtherNet/IP Device Simulator
+# EthernetIPSharp — EtherNet/IP Libary in C#
 
 A full CIP protocol stack in C# (.NET 8) that can simulate EtherNet/IP adapter devices and Logix PLC tag servers. Tested with real Allen-Bradley ControlLogix PLCs.
 
