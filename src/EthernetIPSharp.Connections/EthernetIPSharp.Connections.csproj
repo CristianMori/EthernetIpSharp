@@ -1,0 +1,18 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\EthernetIPSharp.Cip\EthernetIPSharp.Cip.csproj" />
+    <ProjectReference Include="..\EthernetIPSharp.Protocol\EthernetIPSharp.Protocol.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="EthernetIPSharp.Device" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\EthernetIPSharp.Device\EthernetIPSharp.Device.csproj" />
+    <ProjectReference Include="..\..\src\EthernetIPSharp.Safety\EthernetIPSharp.Safety.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!-- Server GC: lower per-pause times, higher throughput. Concurrent GC
+         keeps gen2 collections from blocking foreground threads. Important
+         for safety production where a 100ms GC pause can cause connection
+         drops on tight RPIs. -->
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+  </PropertyGroup>
+
+</Project>
