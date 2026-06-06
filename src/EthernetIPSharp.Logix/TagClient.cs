@@ -29,6 +29,15 @@ public sealed class TagClient : IAsyncDisposable
     private NetworkStream? _stream;
     private readonly SemaphoreSlim _lock = new(1, 1);
 
+    // Instance-ID caches populated by BrowseTagsAsync. When a root tag is in
+    // the cache, BuildTagPath emits a 6-byte logical Symbol Object segment
+    // (Class 0x6B + 16-bit Instance) instead of the longer ANSI symbolic
+    // segment. Logix accepts this form for the controller-scope leaf and for
+    // the in-program tag root (but NOT for the "Program:Foo" prefix itself —
+    // that stays symbolic on the wire).
+    private readonly Dictionary<string, uint> _controllerAtoms = new();
+    private readonly Dictionary<(string Program, string Name), uint> _programAtoms = new();
+
     /// <summary>Session handle assigned by the target.</summary>
     public uint SessionHandle { get; private set; }
 
@@ -93,7 +102,7 @@ public sealed class TagClient : IAsyncDisposable
     /// </summary>
     private async Task<byte[]> ReadStructBytesAsync(string tagName, CancellationToken ct)
     {
-        var path = BuildSymbolicPath(tagName);
+        var path = BuildTagPath(tagName);
         var acc = new List<byte>();
         uint byteOffset = 0;
         bool first = true;
@@ -136,7 +145,7 @@ public sealed class TagClient : IAsyncDisposable
     /// <summary>Read a tag and return the raw response (tag_type + data bytes).</summary>
     public async Task<byte[]> ReadTagRawAsync(string tagName, ushort elementCount = 1, CancellationToken ct = default)
     {
-        var path = BuildSymbolicPath(tagName);
+        var path = BuildTagPath(tagName);
         var reqData = new byte[2];
         BinaryPrimitives.WriteUInt16LittleEndian(reqData, elementCount);
 
@@ -160,7 +169,7 @@ public sealed class TagClient : IAsyncDisposable
                 *(T*)ptr = value;
         }
 
-        var path = BuildSymbolicPath(tagName);
+        var path = BuildTagPath(tagName);
         await SendCipAsync(TagServices.WriteTag, path, data, ct);
     }
 
@@ -212,7 +221,7 @@ public sealed class TagClient : IAsyncDisposable
         BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(2), elementCount);
         value.CopyTo(data.AsSpan(4));
 
-        var path = BuildSymbolicPath(tagName);
+        var path = BuildTagPath(tagName);
         await SendCipAsync(TagServices.WriteTag, path, data, ct);
     }
 
@@ -230,7 +239,7 @@ public sealed class TagClient : IAsyncDisposable
         var subRequests = new List<byte[]>();
         foreach (var name in names)
         {
-            var path = BuildSymbolicPath(name);
+            var path = BuildTagPath(name);
             var reqData = new byte[] { 0x01, 0x00 }; // 1 element
             var mr = new byte[2 + path.Length + reqData.Length];
             mr[0] = TagServices.ReadTag;
@@ -266,7 +275,7 @@ public sealed class TagClient : IAsyncDisposable
         var subRequests = new List<byte[]>();
         foreach (var (name, tagType, value) in writeList)
         {
-            var path = BuildSymbolicPath(name);
+            var path = BuildTagPath(name);
             // Write Tag data: tag_type(2) + element_count(2) + value
             var writeData = new byte[4 + value.Length];
             BinaryPrimitives.WriteUInt16LittleEndian(writeData, tagType);
@@ -370,7 +379,7 @@ public sealed class TagClient : IAsyncDisposable
         BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(4), elementCount);
         value.CopyTo(data.AsSpan(6));
 
-        var path = BuildSymbolicPath(tagName);
+        var path = BuildTagPath(tagName);
         await SendCipAsync(TagServices.WriteTag, path, data, ct);
     }
 
@@ -384,7 +393,17 @@ public sealed class TagClient : IAsyncDisposable
         // Step 1: Browse controller-scope tags
         var tags = await BrowseSymbolsAsync(null, ct);
 
-        // Step 2: Find programs and browse their tags
+        // Cache controller-scope user tag instance IDs (skip system + __ prefix).
+        foreach (var t in tags)
+        {
+            if (t.IsSystem) continue;
+            if (t.Name.StartsWith("__")) continue;
+            _controllerAtoms[t.Name] = (uint)t.InstanceId;
+        }
+
+        // Step 2: Find programs and browse their tags. Programs themselves are
+        // system tags at controller scope, so they're filtered out above; we
+        // pick them out of the raw browse here.
         var programs = tags
             .Where(t => t.Name.StartsWith("Program:") && !t.Name.Contains('.'))
             .Select(t => t.Name)
@@ -393,9 +412,12 @@ public sealed class TagClient : IAsyncDisposable
         foreach (var program in programs)
         {
             var programTags = await BrowseSymbolsAsync(program, ct);
-            // Prefix program-scope tag names with the program name
             foreach (var t in programTags)
+            {
+                if (!t.Name.StartsWith("__"))
+                    _programAtoms[(program, t.Name)] = (uint)t.InstanceId;
                 t.Name = $"{program}.{t.Name}";
+            }
             tags.AddRange(programTags);
         }
 
@@ -767,99 +789,161 @@ public sealed class TagClient : IAsyncDisposable
     }
 
     /// <summary>
-    /// Build a Logix tag path with ANSI Extended Symbolic segments (0x91) and
-    /// Logical Element segments (0x28/0x29/0x2A) for array indices.
-    ///
-    /// Splits on '.' (struct member access). For each dotted piece, peels any
-    /// trailing '[...]' bracket and emits a symbolic segment for the base name
-    /// followed by one element segment per comma-separated index. Studio 5000
-    /// multi-dim arrays (arr[1,2,3]) emit three element segments; chained
-    /// brackets (arr[1][2][3]) produce the same wire encoding.
-    ///
-    /// Examples:
-    ///   "rate"                      -> sym("rate")
-    ///   "counts[3]"                 -> sym("counts") + elem(3)
-    ///   "Temp[10].AnotherArray[4]"  -> sym("Temp") + elem(10)
-    ///                                   + sym("AnotherArray") + elem(4)
-    ///   "arr[1,2,3]"                -> sym("arr") + elem(1) + elem(2) + elem(3)
+    /// Split a tag piece into (baseName, listOfIndexGroups). Each group is the
+    /// comma-separated integer list inside one [...] pair. If a bracket can't
+    /// be parsed as integers, it's left attached to the base name.
+    /// </summary>
+    private static (string BaseName, List<uint[]> BracketGroups) SplitBrackets(string piece)
+    {
+        var groups = new List<uint[]>();
+        var baseName = piece;
+        while (baseName.Length > 0 && baseName[^1] == ']')
+        {
+            int openIdx = baseName.LastIndexOf('[');
+            if (openIdx < 0) break;
+            var inside = baseName.Substring(openIdx + 1, baseName.Length - openIdx - 2);
+            var indices = new List<uint>();
+            bool ok = true;
+            foreach (var raw in inside.Split(','))
+            {
+                var s = raw.Trim();
+                if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!uint.TryParse(s.AsSpan(2), System.Globalization.NumberStyles.HexNumber,
+                                        System.Globalization.CultureInfo.InvariantCulture, out var hex))
+                    { ok = false; break; }
+                    indices.Add(hex);
+                }
+                else
+                {
+                    if (!uint.TryParse(s, out var dec)) { ok = false; break; }
+                    indices.Add(dec);
+                }
+            }
+            if (!ok) break;
+            groups.Add(indices.ToArray());
+            baseName = baseName.Substring(0, openIdx);
+        }
+        groups.Reverse();   // restore source order
+        return (baseName, groups);
+    }
+
+    private static void EmitSymbolic(List<byte> dst, string part)
+    {
+        var b = Encoding.ASCII.GetBytes(part);
+        dst.Add(0x91);
+        dst.Add((byte)b.Length);
+        dst.AddRange(b);
+        if (b.Length % 2 != 0) dst.Add(0);
+    }
+
+    private static void EmitElement(List<byte> dst, uint v)
+    {
+        if (v <= 0xFF) { dst.Add(0x28); dst.Add((byte)v); }
+        else if (v <= 0xFFFF)
+        {
+            dst.Add(0x29); dst.Add(0x00);
+            dst.Add((byte)(v & 0xFF));
+            dst.Add((byte)((v >> 8) & 0xFF));
+        }
+        else
+        {
+            dst.Add(0x2A); dst.Add(0x00);
+            dst.Add((byte)(v & 0xFF));
+            dst.Add((byte)((v >> 8) & 0xFF));
+            dst.Add((byte)((v >> 16) & 0xFF));
+            dst.Add((byte)((v >> 24) & 0xFF));
+        }
+    }
+
+    private static void EmitSymbolInstance(List<byte> dst, uint inst)
+    {
+        // Logical: Class 0x6B (Symbol Object) + 16-bit Instance.
+        dst.Add(0x20); dst.Add(0x6B);
+        dst.Add(0x25); dst.Add(0x00);
+        dst.Add((byte)(inst & 0xFF));
+        dst.Add((byte)((inst >> 8) & 0xFF));
+    }
+
+    /// <summary>
+    /// Build a Logix tag path with ANSI symbolic segments and element segments.
+    /// No instance-ID lookup — this is the all-symbolic fallback used when the
+    /// instance cache is empty or the tag isn't in it.
     /// </summary>
     private static byte[] BuildSymbolicPath(string name)
     {
-        var out_ = new List<byte>(name.Length + 8);
-
-        void EmitSymbolic(string part)
-        {
-            var b = Encoding.ASCII.GetBytes(part);
-            out_.Add(0x91);
-            out_.Add((byte)b.Length);
-            out_.AddRange(b);
-            if (b.Length % 2 != 0) out_.Add(0);
-        }
-
-        void EmitElement(uint v)
-        {
-            if (v <= 0xFF)
-            {
-                out_.Add(0x28);
-                out_.Add((byte)v);
-            }
-            else if (v <= 0xFFFF)
-            {
-                out_.Add(0x29);
-                out_.Add(0x00);
-                out_.Add((byte)(v & 0xFF));
-                out_.Add((byte)((v >> 8) & 0xFF));
-            }
-            else
-            {
-                out_.Add(0x2A);
-                out_.Add(0x00);
-                out_.Add((byte)(v & 0xFF));
-                out_.Add((byte)((v >> 8) & 0xFF));
-                out_.Add((byte)((v >> 16) & 0xFF));
-                out_.Add((byte)((v >> 24) & 0xFF));
-            }
-        }
-
+        var dst = new List<byte>(name.Length + 8);
         foreach (var piece in name.Split('.'))
         {
-            var bracketGroups = new List<uint[]>();
-            var baseName = piece;
-            while (baseName.Length > 0 && baseName[^1] == ']')
+            var (baseName, groups) = SplitBrackets(piece);
+            if (baseName.Length > 0) EmitSymbolic(dst, baseName);
+            foreach (var grp in groups)
+                foreach (var idx in grp)
+                    EmitElement(dst, idx);
+        }
+        return dst.ToArray();
+    }
+
+    /// <summary>
+    /// Cache-aware Logix tag path builder. When the root tag is in the
+    /// instance-ID cache, emits a 6-byte logical Symbol Object segment
+    /// (Class 0x6B + 16-bit Instance) instead of the longer ANSI symbolic
+    /// segment. Logix rejects INST for the "Program:Foo" prefix piece itself
+    /// — that stays symbolic on the wire — but accepts INST for the
+    /// in-program tag root.
+    /// </summary>
+    private byte[] BuildTagPath(string name)
+    {
+        var parts = name.Split('.');
+        var headPart = parts[0];
+        var (headBase, headBrackets) = SplitBrackets(headPart);
+
+        // (2) Program-scope drilling.
+        if (headBase.StartsWith("Program:") && parts.Length >= 2)
+        {
+            var leafPart = parts[1];
+            var (leafBase, leafBrackets) = SplitBrackets(leafPart);
+            if (_programAtoms.TryGetValue((headBase, leafBase), out var inst))
             {
-                int openIdx = baseName.LastIndexOf('[');
-                if (openIdx < 0) break;
-                var inside = baseName.Substring(openIdx + 1, baseName.Length - openIdx - 2);
-                var indices = new List<uint>();
-                bool ok = true;
-                foreach (var raw in inside.Split(','))
+                var dst = new List<byte>(name.Length + 8);
+                EmitSymbolic(dst, headBase);
+                foreach (var grp in headBrackets)
+                    foreach (var idx in grp) EmitElement(dst, idx);
+                EmitSymbolInstance(dst, inst);
+                foreach (var grp in leafBrackets)
+                    foreach (var idx in grp) EmitElement(dst, idx);
+                for (int i = 2; i < parts.Length; i++)
                 {
-                    var s = raw.Trim();
-                    if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
-                    {
-                        if (!uint.TryParse(s.AsSpan(2), System.Globalization.NumberStyles.HexNumber,
-                                            System.Globalization.CultureInfo.InvariantCulture, out var hex))
-                        { ok = false; break; }
-                        indices.Add(hex);
-                    }
-                    else
-                    {
-                        if (!uint.TryParse(s, out var dec)) { ok = false; break; }
-                        indices.Add(dec);
-                    }
+                    var (pb, pi) = SplitBrackets(parts[i]);
+                    if (pb.Length > 0) EmitSymbolic(dst, pb);
+                    foreach (var grp in pi)
+                        foreach (var idx in grp) EmitElement(dst, idx);
                 }
-                if (!ok) break;
-                bracketGroups.Add(indices.ToArray());
-                baseName = baseName.Substring(0, openIdx);
+                return dst.ToArray();
             }
-            if (baseName.Length > 0) EmitSymbolic(baseName);
-            // bracketGroups was filled right-to-left; emit in source order.
-            for (int g = bracketGroups.Count - 1; g >= 0; --g)
-                foreach (var idx in bracketGroups[g])
-                    EmitElement(idx);
+            // Leaf not in cache — fall back to all-symbolic.
+            return BuildSymbolicPath(name);
         }
 
-        return out_.ToArray();
+        // (1) Controller-scope root.
+        if (_controllerAtoms.TryGetValue(headBase, out var rootInst))
+        {
+            var dst = new List<byte>(name.Length + 8);
+            EmitSymbolInstance(dst, rootInst);
+            foreach (var grp in headBrackets)
+                foreach (var idx in grp) EmitElement(dst, idx);
+            for (int i = 1; i < parts.Length; i++)
+            {
+                var (pb, pi) = SplitBrackets(parts[i]);
+                if (pb.Length > 0) EmitSymbolic(dst, pb);
+                foreach (var grp in pi)
+                    foreach (var idx in grp) EmitElement(dst, idx);
+            }
+            return dst.ToArray();
+        }
+
+        // (3) Cache miss.
+        return BuildSymbolicPath(name);
     }
 
     /// <summary>Map a .NET type to the corresponding Logix tag type code.</summary>
