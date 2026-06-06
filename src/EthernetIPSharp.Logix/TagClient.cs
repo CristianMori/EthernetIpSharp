@@ -767,38 +767,99 @@ public sealed class TagClient : IAsyncDisposable
     }
 
     /// <summary>
-    /// Build ANSI Extended Symbolic Segment path bytes for a tag name.
-    /// Handles dotted paths (e.g. "Program:MainProgram.Framework") by encoding
-    /// each segment separated by '.' as a separate symbolic segment.
-    /// This matches how the PLC expects structured member access.
+    /// Build a Logix tag path with ANSI Extended Symbolic segments (0x91) and
+    /// Logical Element segments (0x28/0x29/0x2A) for array indices.
+    ///
+    /// Splits on '.' (struct member access). For each dotted piece, peels any
+    /// trailing '[...]' bracket and emits a symbolic segment for the base name
+    /// followed by one element segment per comma-separated index. Studio 5000
+    /// multi-dim arrays (arr[1,2,3]) emit three element segments; chained
+    /// brackets (arr[1][2][3]) produce the same wire encoding.
+    ///
+    /// Examples:
+    ///   "rate"                      -> sym("rate")
+    ///   "counts[3]"                 -> sym("counts") + elem(3)
+    ///   "Temp[10].AnotherArray[4]"  -> sym("Temp") + elem(10)
+    ///                                   + sym("AnotherArray") + elem(4)
+    ///   "arr[1,2,3]"                -> sym("arr") + elem(1) + elem(2) + elem(3)
     /// </summary>
     private static byte[] BuildSymbolicPath(string name)
     {
-        var parts = name.Split('.');
-        var segments = new List<byte[]>();
+        var out_ = new List<byte>(name.Length + 8);
 
-        foreach (var part in parts)
+        void EmitSymbolic(string part)
         {
-            var partBytes = Encoding.ASCII.GetBytes(part);
-            int padded = partBytes.Length % 2 != 0 ? partBytes.Length + 1 : partBytes.Length;
-            var seg = new byte[2 + padded];
-            seg[0] = 0x91;
-            seg[1] = (byte)partBytes.Length;
-            partBytes.CopyTo(seg, 2);
-            segments.Add(seg);
+            var b = Encoding.ASCII.GetBytes(part);
+            out_.Add(0x91);
+            out_.Add((byte)b.Length);
+            out_.AddRange(b);
+            if (b.Length % 2 != 0) out_.Add(0);
         }
 
-        int totalLen = 0;
-        foreach (var s in segments) totalLen += s.Length;
-
-        var path = new byte[totalLen];
-        int off = 0;
-        foreach (var s in segments)
+        void EmitElement(uint v)
         {
-            s.CopyTo(path, off);
-            off += s.Length;
+            if (v <= 0xFF)
+            {
+                out_.Add(0x28);
+                out_.Add((byte)v);
+            }
+            else if (v <= 0xFFFF)
+            {
+                out_.Add(0x29);
+                out_.Add(0x00);
+                out_.Add((byte)(v & 0xFF));
+                out_.Add((byte)((v >> 8) & 0xFF));
+            }
+            else
+            {
+                out_.Add(0x2A);
+                out_.Add(0x00);
+                out_.Add((byte)(v & 0xFF));
+                out_.Add((byte)((v >> 8) & 0xFF));
+                out_.Add((byte)((v >> 16) & 0xFF));
+                out_.Add((byte)((v >> 24) & 0xFF));
+            }
         }
-        return path;
+
+        foreach (var piece in name.Split('.'))
+        {
+            var bracketGroups = new List<uint[]>();
+            var baseName = piece;
+            while (baseName.Length > 0 && baseName[^1] == ']')
+            {
+                int openIdx = baseName.LastIndexOf('[');
+                if (openIdx < 0) break;
+                var inside = baseName.Substring(openIdx + 1, baseName.Length - openIdx - 2);
+                var indices = new List<uint>();
+                bool ok = true;
+                foreach (var raw in inside.Split(','))
+                {
+                    var s = raw.Trim();
+                    if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (!uint.TryParse(s.AsSpan(2), System.Globalization.NumberStyles.HexNumber,
+                                            System.Globalization.CultureInfo.InvariantCulture, out var hex))
+                        { ok = false; break; }
+                        indices.Add(hex);
+                    }
+                    else
+                    {
+                        if (!uint.TryParse(s, out var dec)) { ok = false; break; }
+                        indices.Add(dec);
+                    }
+                }
+                if (!ok) break;
+                bracketGroups.Add(indices.ToArray());
+                baseName = baseName.Substring(0, openIdx);
+            }
+            if (baseName.Length > 0) EmitSymbolic(baseName);
+            // bracketGroups was filled right-to-left; emit in source order.
+            for (int g = bracketGroups.Count - 1; g >= 0; --g)
+                foreach (var idx in bracketGroups[g])
+                    EmitElement(idx);
+        }
+
+        return out_.ToArray();
     }
 
     /// <summary>Map a .NET type to the corresponding Logix tag type code.</summary>
