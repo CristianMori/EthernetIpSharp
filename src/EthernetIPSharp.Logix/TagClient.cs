@@ -38,17 +38,75 @@ public sealed class TagClient : IAsyncDisposable
     private readonly Dictionary<string, uint> _controllerAtoms = new();
     private readonly Dictionary<(string Program, string Name), uint> _programAtoms = new();
 
+    // Route path used to walk from the EtherNet/IP module to the CPU.
+    // Empty means "deliver as bare MR" (today's behaviour, works on
+    // CompactLogix). When populated, requests are wrapped in
+    // Unconnected_Send (service 0x52) addressed to the Connection Manager
+    // (class 0x06, instance 1) so the EN module knows where to forward.
+    private readonly byte[] _routePath;
+
     /// <summary>Session handle assigned by the target.</summary>
     public uint SessionHandle { get; private set; }
 
     /// <summary>True if connected and session is registered.</summary>
     public bool IsConnected => _client?.Connected == true && SessionHandle != 0;
 
-    /// <summary>Create a tag client for the given host and port.</summary>
-    public TagClient(string host, int port = EipPort)
+    /// <summary>Connect to a Logix controller.
+    /// <para>
+    /// <c>host</c> / <c>port</c> — the EtherNet/IP module's IP and TCP port (44818).
+    /// </para>
+    /// <para>
+    /// <c>path</c> — libplctag-style comma-separated route path used to walk
+    /// from the EtherNet/IP module to the CPU. Examples:
+    /// <list type="bullet">
+    /// <item><description><c>null</c> or empty: no route, request is delivered to the
+    ///   CIP object hosted in the EtherNet/IP module itself (works for
+    ///   CompactLogix and EN-hosted symbol services).</description></item>
+    /// <item><description><c>"1,0"</c>: backplane (port 1), link addr 0 (CPU at slot 0).</description></item>
+    /// <item><description><c>"1,1"</c>: backplane, CPU at slot 1.</description></item>
+    /// <item><description><c>"1,2,A,192.168.1.50,1,0"</c>: multi-hop through a remote chassis.</description></item>
+    /// </list>
+    /// Tokens are decimal (0..255) or 0xNN hex; bytes are passed verbatim and
+    /// even-padded. When a route is set every CIP request is wrapped in
+    /// Unconnected_Send (service 0x52) addressed to the Connection Manager
+    /// (class 0x06, instance 1) so the EN module knows where to forward.
+    /// </para>
+    /// </summary>
+    public TagClient(string host, int port = EipPort, string? path = null)
     {
         _host = host;
         _port = port;
+        _routePath = ParseRoutePath(path);
+    }
+
+    /// <summary>Parse a libplctag-style comma-separated route path.
+    /// Tokens are decimal (e.g. "1") or 0xNN hex. Empty/null returns an
+    /// empty array. Odd-length results are right-padded with 0x00 so the
+    /// encoded route is an integer number of 16-bit CIP words.</summary>
+    internal static byte[] ParseRoutePath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return Array.Empty<byte>();
+        var bytes = new List<byte>();
+        foreach (var rawTok in path.Split(','))
+        {
+            var s = rawTok.Trim();
+            if (s.Length == 0) continue;
+            uint v;
+            if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!uint.TryParse(s.AsSpan(2), System.Globalization.NumberStyles.HexNumber,
+                                    System.Globalization.CultureInfo.InvariantCulture, out v))
+                    throw new ArgumentException($"route path token '{rawTok}' is not a valid byte");
+            }
+            else if (!uint.TryParse(s, out v))
+            {
+                throw new ArgumentException($"route path token '{rawTok}' is not a valid byte");
+            }
+            if (v > 0xFF) throw new ArgumentException($"route path byte out of range: '{rawTok}'");
+            bytes.Add((byte)v);
+        }
+        if (bytes.Count % 2 != 0) bytes.Add(0);
+        return bytes.ToArray();
     }
 
     /// <summary>Connect to the target and register an encapsulation session.</summary>
@@ -691,19 +749,57 @@ public sealed class TagClient : IAsyncDisposable
     private async Task<(byte status, byte[] data)> SendCipWithStatusAsync(
         byte serviceCode, byte[] cipPath, byte[] serviceData, CancellationToken ct)
     {
-        // Build MR request: service + path_size_words + path + data
+        // Build the inner MR request: service + path_size_words + path + data.
         int pathWords = cipPath.Length / 2;
-        var mrRequest = new byte[2 + cipPath.Length + serviceData.Length];
-        mrRequest[0] = serviceCode;
-        mrRequest[1] = (byte)pathWords;
-        cipPath.CopyTo(mrRequest.AsSpan(2));
-        serviceData.CopyTo(mrRequest.AsSpan(2 + cipPath.Length));
+        var innerMr = new byte[2 + cipPath.Length + serviceData.Length];
+        innerMr[0] = serviceCode;
+        innerMr[1] = (byte)pathWords;
+        cipPath.CopyTo(innerMr.AsSpan(2));
+        serviceData.CopyTo(innerMr.AsSpan(2 + cipPath.Length));
+
+        // Wrap in Unconnected_Send (service 0x52, Connection Manager) ONLY
+        // when a route path was configured. The EtherNet/IP module of a
+        // ControlLogix chassis won't auto-deliver an empty-route
+        // Unconnected_Send to the CPU at slot N; the user must say
+        // path="1,N" so the Connection Manager knows where to forward.
+        // When the route is empty the request is sent as bare MR, which is
+        // what CompactLogix and EN-hosted symbol services expect.
+        byte[] mrToSend;
+        if (_routePath.Length > 0)
+        {
+            const byte priorityTick = 0x07;   // priority 0, time-tick 7 (~ms granularity)
+            const byte timeoutTicks = 0xF9;   // 249 * 2^7 ms ≈ 31.9 s
+            int routeWords = _routePath.Length / 2;
+            bool padEmbed = (innerMr.Length % 2) != 0;
+            int usLen = 2 + 2 + innerMr.Length + (padEmbed ? 1 : 0) + 2 + _routePath.Length;
+            var usData = new byte[usLen];
+            int off = 0;
+            usData[off++] = priorityTick;
+            usData[off++] = timeoutTicks;
+            BinaryPrimitives.WriteUInt16LittleEndian(usData.AsSpan(off, 2), (ushort)innerMr.Length); off += 2;
+            innerMr.CopyTo(usData.AsSpan(off)); off += innerMr.Length;
+            if (padEmbed) { usData[off++] = 0; }
+            usData[off++] = (byte)routeWords;
+            usData[off++] = 0;                 // reserved
+            _routePath.CopyTo(usData.AsSpan(off));
+
+            var cmPath = new byte[] { 0x20, 0x06, 0x24, 0x01 };
+            mrToSend = new byte[2 + cmPath.Length + usData.Length];
+            mrToSend[0] = 0x52;                // Unconnected_Send
+            mrToSend[1] = (byte)(cmPath.Length / 2);
+            cmPath.CopyTo(mrToSend.AsSpan(2));
+            usData.CopyTo(mrToSend.AsSpan(2 + cmPath.Length));
+        }
+        else
+        {
+            mrToSend = innerMr;
+        }
 
         // Wrap in CPF: Null Address + Unconnected Data
         var cpfBuf = new byte[2048];
         int cpfLen = CpfParser.Write(cpfBuf, [
             new CpfItem { TypeId = CpfItemType.NullAddress, Data = ReadOnlyMemory<byte>.Empty },
-            new CpfItem { TypeId = CpfItemType.UnconnectedData, Data = mrRequest },
+            new CpfItem { TypeId = CpfItemType.UnconnectedData, Data = mrToSend },
         ]);
 
         // Build SendRRData payload: Interface Handle(4) + Timeout(2) + CPF
