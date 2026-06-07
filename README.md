@@ -51,8 +51,12 @@ The library is layered into independent projects so you can use only the parts y
 **Logix tag protocol**
 - `Read Tag` (0x4C), `Write Tag` (0x4D), Fragmented variants (0x52/0x53), `Read Modify Write` (0x4E)
 - `Multiple Service Packet` (0x0A) for batched explicit messages
-- Tag browsing via `Get Instance Attribute List` (0x55) — paginated
-- UDT template queries and structure read/write
+- Tag browsing via `Get Instance Attribute List` (0x55) — paginated; automatically resolves controller + program scopes and pulls UDT templates
+- UDT template queries and structure read/write (auto-fragmented for structs >504 B)
+- Array indexer syntax in tag names: `counts[3]`, `Temp[10].AnotherArray[4]`, Studio 5000 multi-dim `arr[1,2,3]`
+- ControlLogix backplane routing via a libplctag-style `path` (e.g. `"1,0"` for backplane → slot 0) — wraps each request in `Unconnected_Send` to the Connection Manager
+- Opt-in Class 3 connected explicit messaging (`useConnected: true`) — opens a Forward_Open at connect time, every read/write rides `SendUnitData` instead of UCMM
+- Instance-ID cache populated transparently by `BrowseTagsAsync` so subsequent reads send a 6-byte Symbol Object segment instead of the longer ANSI symbolic name
 - `TagClient` for connecting to a real PLC and reading/writing tags by name
 
 **Diagnostics**
@@ -262,6 +266,7 @@ conn.DataReceived += data => /* ... */;
 ```csharp
 using EthernetIPSharp.Logix;
 
+// CompactLogix or EN-hosted symbol service — no backplane route required.
 await using var client = new TagClient("192.168.1.96");
 await client.ConnectAsync();
 
@@ -269,7 +274,15 @@ await client.ConnectAsync();
 int rate = await client.ReadAsync<int>("rate");
 await client.WriteAsync("rate", 1500);
 
-// Read a structured tag by template
+// Array element access — Studio 5000 syntax works directly. Brackets are
+// emitted as CIP Logical Element segments after the symbolic name.
+int third = await client.ReadAsync<int>("counts[3]");
+int nested = await client.ReadAsync<int>("Temp[10].AnotherArray[4]");
+int multi = await client.ReadAsync<int>("matrix[1,2,3]");
+
+// Browse populates an internal Symbol-Object instance cache. After this
+// call every subsequent tag access uses the short 6-byte instance-ID form
+// in place of the ANSI symbolic name — no API change, just less wire.
 var browse = await client.BrowseTagsAsync();
 var tag = browse.Tags.First(t => t.Name == "MyUdt");
 var value = await client.ReadStructAsync("MyUdt", tag.Template!);
@@ -282,6 +295,30 @@ var writer = new StructureValue(tag.Template!);
 writer.SetBool("enable", true);
 writer.Set<int>("setpoint", 100);
 await client.WriteStructValueAsync("MyUdt", writer);
+```
+
+For a **ControlLogix chassis** where the CPU is at a separate backplane slot,
+pass a libplctag-style route. Tokens are decimal or `0xNN` hex; pairs are
+`port,link` (port 1 = backplane, link = slot):
+
+```csharp
+// Walk from a 1756-EN2T at .96 to the CPU at slot 0.
+await using var client = new TagClient("192.168.1.96", path: "1,0");
+await client.ConnectAsync();
+int rate = await client.ReadAsync<int>("rate");
+```
+
+For hot polling loops, opt in to Class 3 connected explicit messaging.
+`ConnectAsync` performs a Forward_Open against the destination Message
+Router; every subsequent request rides `SendUnitData`. `DisposeAsync` /
+`DisconnectAsync` close the connection cleanly with a Forward_Close.
+
+```csharp
+await using var client = new TagClient(
+    "192.168.1.96", path: "1,0", useConnected: true);
+await client.ConnectAsync();
+for (int i = 0; i < 10_000; i++)
+    await client.ReadAsync<int>("rate");
 ```
 
 ### Logix tag server
@@ -423,7 +460,7 @@ The test suite covers CIP path parsing, MR codec, encapsulation, scanner ↔ ada
 | Type | What it is |
 |---|---|
 | `LogixDispatcher` | Server side. Dispatches tag services + UDT template queries |
-| `TagClient` | Client side. Connect to a real PLC and read/write tags |
+| `TagClient` | Client side. Connect to a real PLC and read/write tags. Accepts an optional libplctag-style routing `path` (e.g. `"1,0"` for backplane → slot 0) and a `useConnected` flag for Class 3 connected explicit messaging. Browse populates a Symbol-Object instance-ID cache that shortens every later tag path. |
 | `TagDatabase`, `Tag` | In-memory tag store with `ValueChanged` events |
 | `LogixDataTypes` | Standard Logix atomic types |
 | `StructureValue` | Helper for reading/writing UDT structures by member name |

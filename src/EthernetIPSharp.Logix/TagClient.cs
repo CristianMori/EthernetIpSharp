@@ -176,10 +176,11 @@ public sealed class TagClient : IAsyncDisposable
         appPath.CopyTo(fo.AsSpan(36));
 
         // Forward_Open targets the LOCAL Connection Manager and must go
-        // as BARE MR — not Unconnected_Send-wrapped. Routing happens at
-        // connection setup using connection_path inside the FO body.
-        // Temporarily clear both the Class-3 flag (so we don't recurse)
-        // and the route path (so the UCS wrap doesn't kick in).
+        // as bare MR — not Unconnected_Send-wrapped. The routing is
+        // carried inside the FO body's connection_path (already prefixed
+        // with _routePath above), not around it. Temporarily clear the
+        // Class-3 flag so SendCipWithStatusAsync doesn't recurse, and
+        // the route path so it doesn't add a UCS wrap.
         var savedRoute = _routePath;
         _class3Open = false;
         _routePath = Array.Empty<byte>();
