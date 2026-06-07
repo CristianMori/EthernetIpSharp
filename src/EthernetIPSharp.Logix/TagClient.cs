@@ -43,7 +43,19 @@ public sealed class TagClient : IAsyncDisposable
     // CompactLogix). When populated, requests are wrapped in
     // Unconnected_Send (service 0x52) addressed to the Connection Manager
     // (class 0x06, instance 1) so the EN module knows where to forward.
-    private readonly byte[] _routePath;
+    private byte[] _routePath;
+
+    // Class 3 connected explicit messaging state. _useConnected captures
+    // the constructor flag; the rest is populated by OpenClass3Async during
+    // ConnectAsync and torn down by CloseClass3Async during DisconnectAsync.
+    private readonly bool _useConnected;
+    private uint _otoTConnId;      // target's chosen O->T id (used when WE send)
+    private uint _ttoOConnId;      // our chosen T->O id (target sends to us)
+    private ushort _connSerial;
+    private ushort _origVendor = 0x0001;
+    private uint _origSerial;
+    private ushort _seqCount;
+    private bool _class3Open;
 
     /// <summary>Session handle assigned by the target.</summary>
     public uint SessionHandle { get; private set; }
@@ -72,11 +84,13 @@ public sealed class TagClient : IAsyncDisposable
     /// (class 0x06, instance 1) so the EN module knows where to forward.
     /// </para>
     /// </summary>
-    public TagClient(string host, int port = EipPort, string? path = null)
+    public TagClient(string host, int port = EipPort, string? path = null,
+                       bool useConnected = false)
     {
         _host = host;
         _port = port;
         _routePath = ParseRoutePath(path);
+        _useConnected = useConnected;
     }
 
     /// <summary>Parse a libplctag-style comma-separated route path.
@@ -109,13 +123,120 @@ public sealed class TagClient : IAsyncDisposable
         return bytes.ToArray();
     }
 
-    /// <summary>Connect to the target and register an encapsulation session.</summary>
+    /// <summary>Connect to the target and register an encapsulation session.
+    /// When useConnected was true, also opens a Class 3 connected explicit
+    /// connection to the destination's Message Router.</summary>
     public async Task ConnectAsync(CancellationToken ct = default)
     {
         _client = new TcpClient();
         await _client.ConnectAsync(_host, _port, ct);
         _stream = _client.GetStream();
         SessionHandle = await RegisterSessionAsync(ct);
+        if (_useConnected)
+            await OpenClass3Async(ct);
+    }
+
+    private async Task OpenClass3Async(CancellationToken ct)
+    {
+        var ticks = (uint)Environment.TickCount;
+        _connSerial = (ushort)(ticks & 0xFFFF);
+        if (_connSerial == 0) _connSerial = 1;
+        _origSerial = ticks;
+        _ttoOConnId = 0x80000000u | _connSerial;
+        _seqCount = 0;
+
+        // Forward_Open connection_path: route bytes + Message Router.
+        var appPath = new byte[_routePath.Length + 4];
+        _routePath.CopyTo(appPath, 0);
+        appPath[_routePath.Length    ] = 0x20;
+        appPath[_routePath.Length + 1] = 0x02;
+        appPath[_routePath.Length + 2] = 0x24;
+        appPath[_routePath.Length + 3] = 0x01;
+
+        // Logix-compatible Class 3 parameters (matches pycomm3 / Studio).
+        const ushort netParams = 0x43F8;      // P2P, priority high, fixed 504 B
+        const byte   transport = 0xA3;        // server, app trigger, class 3
+        const uint   rpi       = 2_500_000;   // 2.5 s (inactivity timeout)
+
+        var fo = new byte[36 + appPath.Length];
+        fo[0] = 0x07;                                                      // priority/tick
+        fo[1] = 0x09;                                                      // timeout_ticks
+        // OT id (4) at [2..5] = 0 (target picks).
+        BinaryPrimitives.WriteUInt32LittleEndian(fo.AsSpan(6, 4), _ttoOConnId);
+        BinaryPrimitives.WriteUInt16LittleEndian(fo.AsSpan(10, 2), _connSerial);
+        BinaryPrimitives.WriteUInt16LittleEndian(fo.AsSpan(12, 2), _origVendor);
+        BinaryPrimitives.WriteUInt32LittleEndian(fo.AsSpan(14, 4), _origSerial);
+        fo[18] = 0x03;                                                     // timeout mult ×32
+        BinaryPrimitives.WriteUInt32LittleEndian(fo.AsSpan(22, 4), rpi);
+        BinaryPrimitives.WriteUInt16LittleEndian(fo.AsSpan(26, 2), netParams);
+        BinaryPrimitives.WriteUInt32LittleEndian(fo.AsSpan(28, 4), rpi);
+        BinaryPrimitives.WriteUInt16LittleEndian(fo.AsSpan(32, 2), netParams);
+        fo[34] = transport;
+        fo[35] = (byte)(appPath.Length / 2);
+        appPath.CopyTo(fo.AsSpan(36));
+
+        // Forward_Open targets the LOCAL Connection Manager and must go
+        // as BARE MR — not Unconnected_Send-wrapped. Routing happens at
+        // connection setup using connection_path inside the FO body.
+        // Temporarily clear both the Class-3 flag (so we don't recurse)
+        // and the route path (so the UCS wrap doesn't kick in).
+        var savedRoute = _routePath;
+        _class3Open = false;
+        _routePath = Array.Empty<byte>();
+        try
+        {
+            var cmPath = new byte[] { 0x20, 0x06, 0x24, 0x01 };
+            var (status, data) = await SendCipWithStatusAsync(0x54, cmPath, fo, ct);
+            if (status != 0)
+                throw new InvalidOperationException(
+                    $"Class 3 Forward_Open failed: status=0x{status:X2}");
+            if (data.Length < 8)
+                throw new InvalidOperationException("Class 3 Forward_Open: response too short");
+            _otoTConnId = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(0, 4));
+        }
+        finally
+        {
+            _routePath = savedRoute;
+        }
+        _class3Open = true;
+    }
+
+    private async Task CloseClass3Async(CancellationToken ct)
+    {
+        if (!_class3Open) return;
+        _class3Open = false;
+        var savedRoute = _routePath;
+        _routePath = Array.Empty<byte>();
+        try
+        {
+            var appPath = new byte[savedRoute.Length + 4];
+            savedRoute.CopyTo(appPath, 0);
+            appPath[savedRoute.Length    ] = 0x20;
+            appPath[savedRoute.Length + 1] = 0x02;
+            appPath[savedRoute.Length + 2] = 0x24;
+            appPath[savedRoute.Length + 3] = 0x01;
+
+            var close_ = new byte[12 + appPath.Length];
+            close_[0] = 0x07;
+            close_[1] = 0x09;
+            BinaryPrimitives.WriteUInt16LittleEndian(close_.AsSpan(2, 2), _connSerial);
+            BinaryPrimitives.WriteUInt16LittleEndian(close_.AsSpan(4, 2), _origVendor);
+            BinaryPrimitives.WriteUInt32LittleEndian(close_.AsSpan(6, 4), _origSerial);
+            close_[10] = (byte)(appPath.Length / 2);
+            close_[11] = 0;
+            appPath.CopyTo(close_.AsSpan(12));
+
+            var cmPath = new byte[] { 0x20, 0x06, 0x24, 0x01 };
+            await SendCipWithStatusAsync(0x4E, cmPath, close_, ct);
+        }
+        catch
+        {
+            // best-effort
+        }
+        finally
+        {
+            _routePath = savedRoute;
+        }
     }
 
     /// <summary>Read a single tag value by name.</summary>
@@ -700,6 +821,8 @@ public sealed class TagClient : IAsyncDisposable
     /// <summary>Unregister session and close TCP connection.</summary>
     public async Task DisconnectAsync()
     {
+        if (_class3Open)
+            await CloseClass3Async(CancellationToken.None);
         if (_stream != null && SessionHandle != 0)
         {
             try
@@ -756,6 +879,13 @@ public sealed class TagClient : IAsyncDisposable
         innerMr[1] = (byte)pathWords;
         cipPath.CopyTo(innerMr.AsSpan(2));
         serviceData.CopyTo(innerMr.AsSpan(2 + cipPath.Length));
+
+        // Class 3 connected explicit: ride the established connection via
+        // SendUnitData. No route bytes per request (the connection was
+        // opened with the route baked into the Forward_Open's
+        // connection_path), no Unconnected_Send wrap.
+        if (_class3Open)
+            return await SendConnectedAsync(innerMr, ct);
 
         // Wrap in Unconnected_Send (service 0x52, Connection Manager) ONLY
         // when a route path was configured. The EtherNet/IP module of a
@@ -823,6 +953,58 @@ public sealed class TagClient : IAsyncDisposable
         }
 
         throw new InvalidOperationException("No response data");
+    }
+
+    /// <summary>Send an already-encoded MR over the established Class 3
+    /// connection via SendUnitData. CPF wraps a ConnectedAddress (0x00A1,
+    /// our OT id) and a ConnectedData (0x00B1, 2-byte sequence count + MR).
+    /// </summary>
+    private async Task<(byte status, byte[] data)> SendConnectedAsync(
+        byte[] innerMr, CancellationToken ct)
+    {
+        _seqCount = (ushort)((_seqCount + 1) & 0xFFFF);
+        // ConnectedData payload = seq(2) + MR
+        var cd = new byte[2 + innerMr.Length];
+        BinaryPrimitives.WriteUInt16LittleEndian(cd.AsSpan(0, 2), _seqCount);
+        innerMr.CopyTo(cd.AsSpan(2));
+
+        // SendUnitData payload = InterfaceHandle(4) + Timeout(2) + CPF{
+        //   ConnectedAddress(0x00A1) addr_len=4 + OT_conn_id,
+        //   ConnectedData(0x00B1)    data_len   + cd }
+        int payloadLen = 6 + 2 + 4 + 4 + 4 + cd.Length;
+        var payload = new byte[payloadLen];
+        BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(6, 2), 2);             // item count
+        BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(8, 2), 0x00A1);
+        BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(10, 2), 4);
+        BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(12, 4), _otoTConnId);
+        BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(16, 2), 0x00B1);
+        BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(18, 2), (ushort)cd.Length);
+        cd.CopyTo(payload.AsSpan(20));
+
+        var resp = await SendEncapsulatedAsync(EncapsulationCommand.SendUnitData, payload, ct);
+        if (resp.Length < 8)
+            throw new InvalidOperationException("SendUnitData reply too short");
+        int offset = 6;
+        ushort itemCount = BinaryPrimitives.ReadUInt16LittleEndian(resp.AsSpan(offset, 2));
+        offset += 2;
+        for (int i = 0; i < itemCount; ++i)
+        {
+            if (offset + 4 > resp.Length) break;
+            ushort typeId = BinaryPrimitives.ReadUInt16LittleEndian(resp.AsSpan(offset, 2));
+            ushort length = BinaryPrimitives.ReadUInt16LittleEndian(resp.AsSpan(offset + 2, 2));
+            offset += 4;
+            if (offset + length > resp.Length) break;
+            if (typeId == 0x00B1 && length >= 2)
+            {
+                // ConnectedData payload = seq(2) + MR response.
+                var inner = resp.AsMemory(offset + 2, length - 2);
+                if (!MrCodec.TryParseResponse(inner, out _, out var cipStatus, out var respData))
+                    throw new InvalidOperationException("Malformed connected MR response");
+                return (cipStatus.GeneralStatus, respData.ToArray());
+            }
+            offset += length;
+        }
+        throw new InvalidOperationException("No ConnectedData item in SendUnitData reply");
     }
 
     private async Task<uint> RegisterSessionAsync(CancellationToken ct)
