@@ -1,0 +1,99 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+       Rollup packaging project — packs the six library assemblies
+       (Cip, Protocol, Connections, Device, Safety, Logix) into a single
+       `EthernetIPSharp` NuGet. Users get the whole stack as one dependency.
+
+       Implementation note: we deliberately don't reference the projects as
+       ProjectReference and instead let a dependency chain (Logix -> everything)
+       via BuildProjectReferences=true drive the build. The DLLs then get
+       harvested by an MSBuild target and injected into TfmSpecificPackageFile
+       so they land under lib/net8.0/ inside the .nupkg.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>true</IsPackable>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS2008</NoWarn>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+
+    <!-- Package identity -->
+    <PackageId>EthernetIPSharp</PackageId>
+    <Version>1.0.0</Version>
+    <Authors>Cristian Mori</Authors>
+    <Company>Cristian Mori</Company>
+    <Copyright>Copyright 2026 Cristian Mori</Copyright>
+    <Title>EthernetIPSharp — EtherNet/IP and CIP Safety for .NET</Title>
+    <Description>An EtherNet/IP and CIP Safety protocol stack for .NET 8: adapter (target), scanner (originator), and Logix-compatible tag client / server. Interop-tested against real Allen-Bradley ControlLogix and 1734 distributed safety I/O.</Description>
+    <PackageTags>ethernet-ip;cip;cip-safety;allen-bradley;controllogix;compactlogix;logix;plc;industrial;automation</PackageTags>
+
+    <!-- License, README, source link -->
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <RepositoryUrl>https://github.com/CristianMori/EthernetIpSharp</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageProjectUrl>https://github.com/CristianMori/EthernetIpSharp</PackageProjectUrl>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+
+    <!-- This project produces no assembly of its own; only its ProjectReferences do. -->
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+
+    <PackageOutputPath>$(MSBuildThisFileDirectory)..\..\artifacts\nuget</PackageOutputPath>
+  </PropertyGroup>
+
+  <!--
+       Reference every library so the pack pipeline builds them all. Once
+       built, the AddLibraryDllsToPackage target below rakes their outputs
+       into TfmSpecificPackageFile.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\EthernetIPSharp.Cip\EthernetIPSharp.Cip.csproj" />
+    <ProjectReference Include="..\..\src\EthernetIPSharp.Protocol\EthernetIPSharp.Protocol.csproj" />
+    <ProjectReference Include="..\..\src\EthernetIPSharp.Connections\EthernetIPSharp.Connections.csproj" />
+    <ProjectReference Include="..\..\src\EthernetIPSharp.Device\EthernetIPSharp.Device.csproj" />
+    <ProjectReference Include="..\..\src\EthernetIPSharp.Safety\EthernetIPSharp.Safety.csproj" />
+    <ProjectReference Include="..\..\src\EthernetIPSharp.Logix\EthernetIPSharp.Logix.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\LICENSE" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetsForTfmSpecificContentInPackage>$(TargetsForTfmSpecificContentInPackage);AddLibraryDllsToPackage</TargetsForTfmSpecificContentInPackage>
+    <!--
+         NU5128 warns when there's a lib/ folder but no matching dependency
+         group in the nuspec — expected here because we ship a self-contained
+         rollup with SuppressDependenciesWhenPacking=true.
+    -->
+    <NoWarn>$(NoWarn);NU5128</NoWarn>
+  </PropertyGroup>
+
+  <!--
+       For each ProjectReference, hand-pick the project's own DLL / PDB / XML
+       from its `bin/Release/net8.0/` and stage it under lib/net8.0/ in the
+       .nupkg. Filtering by `%(Filename)` means we grab only the project's own
+       output, not the transitively-copied dependencies (which the pack task
+       would otherwise complain about as duplicates).
+  -->
+  <Target Name="AddLibraryDllsToPackage" DependsOnTargets="ResolveProjectReferences">
+    <ItemGroup>
+      <_LibProject Include="@(_MSBuildProjectReferenceExistent)" />
+    </ItemGroup>
+    <ItemGroup>
+      <_LibDll Include="%(_LibProject.RootDir)%(_LibProject.Directory)bin\$(Configuration)\$(TargetFramework)\%(_LibProject.Filename).dll" />
+      <_LibPdb Include="%(_LibProject.RootDir)%(_LibProject.Directory)bin\$(Configuration)\$(TargetFramework)\%(_LibProject.Filename).pdb" />
+    </ItemGroup>
+    <ItemGroup>
+      <TfmSpecificPackageFile Include="@(_LibDll)" PackagePath="lib\$(TargetFramework)\%(Filename)%(Extension)" />
+      <TfmSpecificPackageFile Include="@(_LibPdb)" PackagePath="lib\$(TargetFramework)\%(Filename)%(Extension)" />
+    </ItemGroup>
+  </Target>
+
+</Project>

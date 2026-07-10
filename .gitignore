@@ -7,3 +7,4 @@ obj/
 *.DotSettings.user
 tools/
 settings.local.json
+artifacts/
