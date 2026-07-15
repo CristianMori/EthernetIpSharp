@@ -92,9 +92,11 @@ public sealed class SafetyScannerConnection : IAsyncDisposable
     private byte _pingCount;
     private bool _consumerActive;
     private ushort _timestamp;
-    // Our producer's rollover (used by Encode on server O->T). Never advanced
-    // today — our 16-bit timestamp wraps without notice. The target's
-    // validator is responsible for catching our wraps on its side.
+    // Our producer's rollover (used by Encode on server O->T). Seeded from
+    // serverConfig.InitialRolloverValue at Open, incremented in ProduceServerData
+    // every time _timestamp wraps 0xFFFF -> 0x0000. Extended-format CRC-S5
+    // folds this into the seed, so any spec-compliant consumer would drift
+    // out of sync after the first ~8.4 s if this counter stayed at 0.
     private ushort _rolloverCount;
     // Target's producer rollover (used by Decode on client T<-O). Advanced
     // here on every observed wire-timestamp wrap. Must be kept distinct from
@@ -158,6 +160,12 @@ public sealed class SafetyScannerConnection : IAsyncDisposable
         conn._outputData = new byte[serverConfig.ConsumedDataSize];
         conn._inputDataSize = clientConfig.ProducedDataSize;
         conn._routePrefix = routePrefix ?? Array.Empty<byte>();
+        // Seed producer state from the values we advertise in the safety
+        // segment — a spec-compliant consumer reads the same values off the
+        // segment and starts its rollover counter there, so both ends must
+        // agree from frame 1.
+        conn._timestamp = serverConfig.InitialTimestamp;
+        conn._rolloverCount = serverConfig.InitialRolloverValue;
 
         // Generate unique connection serials
         conn._serverConnSerial = (ushort)(Environment.TickCount & 0xFFFF);
@@ -340,7 +348,12 @@ public sealed class SafetyScannerConnection : IAsyncDisposable
             var mode = ModeByte.Create(runIdle, _pingCount);
 
             if (_consumerActive)
+            {
+                ushort prevTs = _timestamp;
                 _timestamp += (ushort)(50000 / 128); // approximate RPI in 128µs ticks
+                if (_timestamp < prevTs)
+                    _rolloverCount = (ushort)(_rolloverCount + 1);
+            }
 
             var buf = new byte[_outputData.Length * 2 + 16];
             int len = SafetyFrameCodec.Encode(buf, _outputData, _format, mode, timestamp,
