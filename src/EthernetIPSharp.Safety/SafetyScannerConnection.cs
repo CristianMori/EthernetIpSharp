@@ -344,7 +344,15 @@ public sealed class SafetyScannerConnection : IAsyncDisposable
         try
         {
             bool runIdle = _consumerActive && _runIdle;
+            // Snapshot both counters BEFORE advancing them. The frame we're
+            // about to encode carries the OLD timestamp with the OLD rollover;
+            // the consumer detects the wrap from the *next* frame's timestamp
+            // jump and bumps its own rollover to match. Reading rollover after
+            // the bump would emit (old_ts, new_rollover) on the wrap frame,
+            // which CRCs with the wrong seed and shows up as one failed frame
+            // per wrap boundary.
             ushort timestamp = _consumerActive ? _timestamp : (ushort)0;
+            ushort rollover = _rolloverCount;
             var mode = ModeByte.Create(runIdle, _pingCount);
 
             if (_consumerActive)
@@ -357,7 +365,7 @@ public sealed class SafetyScannerConnection : IAsyncDisposable
 
             var buf = new byte[_outputData.Length * 2 + 16];
             int len = SafetyFrameCodec.Encode(buf, _outputData, _format, mode, timestamp,
-                _pidSeedS1, _pidSeedS3, _pidSeedS5, _rolloverCount);
+                _pidSeedS1, _pidSeedS3, _pidSeedS5, rollover);
 
             _udp.SendIoData(_serverTargetEndpoint, _serverOtoTId, _serverEncapSeq, buf.AsSpan(0, len));
             if (_serverEncapSeq <= 3)
