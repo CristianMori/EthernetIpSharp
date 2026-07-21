@@ -90,6 +90,29 @@ public static class ConnectionPathParser
             byte seg = path[offset];
             byte segType = (byte)(seg & 0xE0);
 
+            // Electronic key `0x34` MUST be checked BEFORE the generic
+            // logical-segment branch. `0x34 & 0xE0 == 0x20`, so a naive
+            // `segType == 0x20` dispatch treats the key segment as an
+            // unknown logical type, skips only its first byte, and then
+            // mis-decodes the 8-byte key payload as further segments.
+            // Works "by accident" today because Studio 5000 emits key
+            // data as all zeros (vendor/device/prod/rev = "any") and
+            // 0x00 happens to be a valid port segment leader — so the
+            // 8 key bytes get walked as 4 no-op port segments. A PLC
+            // enforcing electronic keying would silently misparse.
+            if (seg == 0x34) // Electronic key segment
+            {
+                hasKey = true;
+                // Format: 0x34 (1) + key_format (1) + key_data (variable, typically 8 bytes for format 4/5)
+                offset++; // skip 0x34
+                if (offset >= path.Length) goto done;
+                byte keyFormat = path[offset++];
+                // Format 4 and 5 both use 8 bytes of key data
+                int keyDataSize = (keyFormat == 4 || keyFormat == 5) ? 8 : 0;
+                offset += keyDataSize;
+                continue;
+            }
+
             if (segType == 0x20) // Logical segment
             {
                 byte logicalType = (byte)(seg & 0x1C);
@@ -148,17 +171,6 @@ public static class ConnectionPathParser
                     if (offset >= path.Length) goto done;
                     offset++; // link address
                 }
-            }
-            else if (seg == 0x34) // Electronic key segment
-            {
-                hasKey = true;
-                // Format: 0x34 (1) + key_format (1) + key_data (variable, typically 8 bytes for format 4/5)
-                offset++; // skip 0x34
-                if (offset >= path.Length) goto done;
-                byte keyFormat = path[offset++];
-                // Format 4 and 5 both use 8 bytes of key data
-                int keyDataSize = (keyFormat == 4 || keyFormat == 5) ? 8 : 0;
-                offset += keyDataSize;
             }
             else if (segType == 0x80) // Simple Data Segment (config data)
             {
