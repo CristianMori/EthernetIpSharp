@@ -236,6 +236,16 @@ public sealed class IoConnection : IDisposable
     /// <summary>Timestamp of the last received O→T packet (UTC). Used for watchdog timeout.</summary>
     public DateTime LastReceivedUtc { get; set; } = DateTime.UtcNow;
 
+    /// <summary>
+    /// Per CIP Vol 1 §3-4.5.2, the consumer's connection-timeout timer must
+    /// not start until the first inbound frame arrives. Without this flag the
+    /// watchdog would count from FwdOpen accept and close the connection
+    /// whenever the producer takes longer than `rpi * timeout_multiplier` to
+    /// start streaming — common on scanners that establish both directions
+    /// of a paired safety connection before starting either producer.
+    /// </summary>
+    public bool FirstReceived { get; set; } = false;
+
     // --- Timers (managed by VirtualDevice) ---
 
     /// <summary>Watchdog timer — fires to check if O→T data has stopped arriving.</summary>

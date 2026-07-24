@@ -399,12 +399,15 @@ public abstract class VirtualDevice : IAsyncDisposable
         }
 
         conn.LastReceivedUtc = DateTime.UtcNow;
+        conn.FirstReceived = true;
         HandleReceivedIoData(conn, cpf.Payload);
     }
 
     private void CheckWatchdog(IoConnection conn)
     {
         if (conn.State != ConnectionState.Established) return;
+        // CIP Vol 1 §3-4.5.2: don't count until the first inbound frame.
+        if (!conn.FirstReceived) return;
         if (DateTime.UtcNow - conn.LastReceivedUtc > conn.ConnectionTimeout)
             ConnectionManager.TimeoutConnection(conn);
     }
