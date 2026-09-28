@@ -4,9 +4,54 @@ using System.Text;
 namespace EthernetIPSharp.Cip;
 
 /// <summary>
+/// A single segment inside a CIP EPATH — ordered as it appeared on the wire so that
+/// callers can distinguish, for example, <c>Program:Cell.Timer1</c> (two symbolic
+/// segments in sequence) from a flattened <c>"Program:Cell.Timer1"</c> string, or the
+/// two element indices of <c>Matrix[1,2]</c>.
+/// </summary>
+public abstract record CipPathSegment;
+
+/// <summary>ANSI Extended Symbolic Segment (0x91) — a single member/scope name.</summary>
+public sealed record SymbolicPathSegment(string Name) : CipPathSegment;
+
+/// <summary>Logical Element ID segment (0x28/0x29/0x2A) — one index into a tag array.</summary>
+public sealed record ElementPathSegment(uint Index) : CipPathSegment;
+
+/// <summary>
+/// Logical segment other than Element ID (Class, Instance, Attribute, ConnectionPoint).
+/// The convenience fields on <see cref="CipPath"/> still hold last-seen values so existing
+/// callers keep working, but this segment record preserves the on-wire order.
+/// </summary>
+public sealed record LogicalPathSegment(LogicalSegmentKind Kind, uint Value) : CipPathSegment;
+
+public enum LogicalSegmentKind : byte
+{
+    ClassId = 0x00,
+    InstanceId = 0x04,
+    ConnectionPoint = 0x0C,
+    AttributeId = 0x10,
+}
+
+/// <summary>
 /// Parsed CIP EPATH — logical segments (class, instance, attribute, connection point, element),
 /// symbolic segments (ANSI Extended Symbolic), and raw path bytes.
 /// </summary>
+/// <remarks>
+/// <para>
+/// <see cref="Segments"/> holds every parsed segment in the order it appeared on the wire.
+/// Use it when segment ordering matters (member drilling after an element index, program-scope
+/// prefixes, multi-dimensional array indices).
+/// </para>
+/// <para>
+/// The flat convenience fields (<see cref="ClassId"/>, <see cref="InstanceId"/>,
+/// <see cref="AttributeId"/>, <see cref="ConnectionPoint"/>, <see cref="ElementId"/>,
+/// <see cref="SymbolicName"/>) are derived from <see cref="Segments"/> for back-compat:
+/// scalar logical values keep the last-seen segment's value, and <see cref="SymbolicName"/>
+/// is every symbolic segment joined with '.'.  New code should read <see cref="Segments"/>
+/// directly instead of these fields when parsing paths that carry members, elements, or
+/// program scopes.
+/// </para>
+/// </remarks>
 public readonly struct CipPath
 {
     public uint? ClassId { get; init; }
@@ -17,6 +62,15 @@ public readonly struct CipPath
 
     /// <summary>Full symbolic path from ANSI Extended Symbolic Segments (e.g. "MyStruct.member").</summary>
     public string? SymbolicName { get; init; }
+
+    private readonly IReadOnlyList<CipPathSegment>? _segments;
+
+    /// <summary>Every parsed segment in on-wire order. Empty (never null) when nothing parsed or when the path was built via object-initializer without setting this field.</summary>
+    public IReadOnlyList<CipPathSegment> Segments
+    {
+        get => _segments ?? Array.Empty<CipPathSegment>();
+        init => _segments = value;
+    }
 
     /// <summary>Raw EPATH bytes for pass-through or re-parsing.</summary>
     public ReadOnlyMemory<byte>? RawPath { get; init; }
@@ -49,6 +103,7 @@ public readonly struct CipPath
         ushort? connectionPoint = null;
         uint? elementId = null;
         StringBuilder? symbolicName = null;
+        var segments = new List<CipPathSegment>();
         int offset = 0;
 
         while (offset < data.Length)
@@ -68,6 +123,8 @@ public readonly struct CipPath
                     symbolicName = new StringBuilder(name);
                 else
                     symbolicName.Append('.').Append(name);
+
+                segments.Add(new SymbolicPathSegment(name));
 
                 continue;
             }
@@ -105,18 +162,23 @@ public readonly struct CipPath
                 {
                     case LogicalTypeClassId:
                         classId = value;
+                        segments.Add(new LogicalPathSegment(LogicalSegmentKind.ClassId, value));
                         break;
                     case LogicalTypeInstanceId:
                         instanceId = value;
+                        segments.Add(new LogicalPathSegment(LogicalSegmentKind.InstanceId, value));
                         break;
                     case LogicalTypeAttributeId:
                         attributeId = (ushort)value;
+                        segments.Add(new LogicalPathSegment(LogicalSegmentKind.AttributeId, value));
                         break;
                     case LogicalTypeConnectionPoint:
                         connectionPoint = (ushort)value;
+                        segments.Add(new LogicalPathSegment(LogicalSegmentKind.ConnectionPoint, value));
                         break;
                     case LogicalTypeElementId:
                         elementId = value;
+                        segments.Add(new ElementPathSegment(value));
                         break;
                 }
             }
@@ -135,6 +197,7 @@ public readonly struct CipPath
             ConnectionPoint = connectionPoint,
             ElementId = elementId,
             SymbolicName = symbolicName?.ToString(),
+            Segments = segments,
             RawPath = data.Slice(0, offset).ToArray(),
         }, offset);
     }
