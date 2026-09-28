@@ -44,13 +44,29 @@ public sealed class TagDatabase : ITagDatabase
         int arrayDims = elementCount > 1 ? 1 : 0;
         ushort symbolType = LogixDataTypes.MakeAtomicSymbolType(tagType, arrayDims);
 
+        // BOOL arrays are DWORD-packed in Logix (32 bits per DWORD), so the storage
+        // size is ceil(bitCount / 32) * 4 rather than one byte per element.  A
+        // BOOL scalar (elementCount == 1) uses the normal 1-byte layout.
+        int? dataSize = null;
+        if (tagType == LogixDataTypes.BOOL && elementCount > 1)
+        {
+            if (elementCount % 32 != 0)
+                throw new ArgumentException(
+                    $"BOOL array element count must be a multiple of 32 (got {elementCount})",
+                    nameof(elementCount));
+            dataSize = elementCount / 8;
+        }
+
+        uint[] dims = elementCount > 1 ? new uint[] { (uint)elementCount } : Array.Empty<uint>();
+
         var tag = new Tag(
             instanceId: Interlocked.Increment(ref _nextInstanceId),
             name: name,
             symbolType: symbolType,
             tagType: tagType,
             elementSize: elementSize,
-            elementCount: elementCount);
+            dims: dims,
+            dataSize: dataSize);
 
         RegisterTag(tag);
         return tag;

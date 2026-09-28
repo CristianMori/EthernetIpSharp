@@ -69,6 +69,10 @@ public static class TagPathWalker
             for (int i = 0; i < root.Dims.Count; i++) pendingDims[i] = root.Dims[i];
         }
 
+        // BOOL[] is DWORD-packed: the final linear index maps to (byte / 8, bit % 8)
+        // rather than the usual (index * elementSize).
+        bool rootIsBoolArray = root.TagType == LogixDataTypes.BOOL && root.Dims.Count > 0;
+
         foreach (var seg in segments)
         {
             switch (seg)
@@ -159,8 +163,18 @@ public static class TagPathWalker
                     pendingDimIdx++;
                     if (pendingDimIdx == pendingDims.Length)
                     {
-                        // Fully indexed — collapse into byte offset.
-                        offset += (int)(pendingRunning * elementSize);
+                        // Fully indexed — collapse into byte offset.  BOOL arrays
+                        // translate the linear bit index into (byte/8, bit%8) since
+                        // they are DWORD-packed rather than one-byte-per-element.
+                        if (rootIsBoolArray)
+                        {
+                            offset += (int)(pendingRunning / 8);
+                            bitPos = (int)(pendingRunning % 8);
+                        }
+                        else
+                        {
+                            offset += (int)(pendingRunning * elementSize);
+                        }
                         pendingDims = null;
                         pendingDimIdx = 0;
                         pendingRunning = 0;

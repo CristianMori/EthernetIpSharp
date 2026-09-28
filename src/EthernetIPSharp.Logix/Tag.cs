@@ -74,9 +74,15 @@ public sealed class Tag
     {
     }
 
-    /// <summary>Construct a tag with an explicit multi-dimensional array shape.</summary>
+    /// <summary>
+    /// Construct a tag with an explicit multi-dimensional array shape.  Pass
+    /// <paramref name="dataSize"/> only when the storage layout is not simply
+    /// <c>elementSize * product(dims)</c> — used by BOOL arrays where the logical
+    /// element count is the bit count but storage is DWORD-packed
+    /// (ceil(bits/32) * 4 bytes).
+    /// </summary>
     public Tag(uint instanceId, string name, ushort symbolType, ushort tagType,
-               int elementSize, uint[] dims)
+               int elementSize, uint[] dims, int? dataSize = null)
     {
         InstanceId = instanceId;
         Name = name;
@@ -88,7 +94,7 @@ public sealed class Tag
         long total = 1;
         for (int i = 0; i < dims.Length; i++) total *= dims[i];
         ElementCount = dims.Length == 0 ? 1 : (int)total;
-        _data = new byte[elementSize * ElementCount];
+        _data = new byte[dataSize ?? elementSize * ElementCount];
     }
 
     /// <summary>Read the entire tag data buffer.</summary>
