@@ -156,16 +156,36 @@ public sealed class TagDatabase : ITagDatabase
                 boolBitPos = 0;
                 boolHostOffset = -1;
 
-                int elemSize = LogixDataTypes.GetElementSize(m.DataType);
-                if (elemSize <= 0) elemSize = 4; // Default for unknown/struct types
+                int elemSize;
+                int alignment;
+                ushort resolvedDataType = m.DataType;
 
-                // Alignment based on data type
-                int alignment = GetAlignment(m.DataType, elemSize);
+                if (LogixDataTypes.IsStruct(m.DataType))
+                {
+                    // Nested struct member — resolve to a registered template so the
+                    // element size is the nested StructureSize, not the 4-byte fallback.
+                    // Preserve the 0x8000 bit in the stored DataType so TemplateObject
+                    // emits it and clients recurse via ReadTemplate.
+                    ushort nestedId = LogixDataTypes.GetTemplateId(m.DataType);
+                    var nested = FindTemplate(nestedId)
+                        ?? throw new InvalidOperationException(
+                            $"Template member '{m.Name}' references unregistered nested template 0x{nestedId:X4}. Register the nested template first.");
+                    elemSize = (int)nested.StructureSize;
+                    alignment = 4; // Structures always align on 4-byte boundaries.
+                    resolvedDataType = (ushort)(0x8000 | nestedId);
+                }
+                else
+                {
+                    elemSize = LogixDataTypes.GetElementSize(m.DataType);
+                    if (elemSize <= 0) elemSize = 4; // Default for unknown types.
+                    alignment = GetAlignment(m.DataType, elemSize);
+                }
+
                 offset = Align(offset, alignment);
 
                 int memberSize = m.ArraySize > 0 ? elemSize * m.ArraySize : elemSize;
 
-                resolvedMembers.Add(new TemplateMemberInfo(m.Name, m.DataType, offset, m.ArraySize, elemSize));
+                resolvedMembers.Add(new TemplateMemberInfo(m.Name, resolvedDataType, offset, m.ArraySize, elemSize));
                 offset += memberSize;
             }
         }
@@ -184,6 +204,42 @@ public sealed class TagDatabase : ITagDatabase
             members: resolvedMembers.ToArray());
 
         _templates[instanceId] = template;
+        TemplateAdded?.Invoke(template);
+        return template;
+    }
+
+    /// <summary>
+    /// Register a pre-resolved template with explicit offsets, sizes, and (for nested
+    /// struct members) the 0x8000 bit already set on their DataType.  Used by the
+    /// PlcTranspiler to import the exact layout Studio 5000 exports without the
+    /// library recomputing offsets.  Also fully covers add-on instruction backing
+    /// structures (BOOL parameters packed into hidden DINT hosts, SINT reordering)
+    /// since the caller supplies the layout.
+    ///
+    /// <paramref name="template"/> must have a non-zero <see cref="TemplateDefinition.InstanceId"/>
+    /// that is not already in use.  Nested-struct members (DataType with 0x8000
+    /// set) are not resolved by this method — the caller must register children
+    /// before parents so <see cref="FindTemplate"/> can find them at request time.
+    /// </summary>
+    public TemplateDefinition AddTemplate(TemplateDefinition template)
+    {
+        if (template.InstanceId == 0)
+            throw new ArgumentException(
+                "TemplateDefinition.InstanceId must be non-zero. Use AddTemplate(name, members[]) for auto-assignment.",
+                nameof(template));
+        if (!_templates.TryAdd(template.InstanceId, template))
+            throw new InvalidOperationException(
+                $"Template with InstanceId 0x{template.InstanceId:X4} already exists");
+
+        // Bump the auto-assign counter past this id so a later
+        // AddTemplate(name, members[]) call doesn't collide.
+        int cur;
+        do
+        {
+            cur = _nextTemplateId;
+            if (cur >= template.InstanceId) break;
+        } while (Interlocked.CompareExchange(ref _nextTemplateId, template.InstanceId, cur) != cur);
+
         TemplateAdded?.Invoke(template);
         return template;
     }

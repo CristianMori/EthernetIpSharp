@@ -27,6 +27,14 @@ public interface ITagDatabase
     /// <summary>Define a structure template (UDT) with the given members.</summary>
     TemplateDefinition AddTemplate(string name, params TemplateMember[] members);
 
+    /// <summary>
+    /// Register a pre-resolved template (explicit offsets, sizes, and nested-struct
+    /// DataType bits). Used by callers that already know the exact byte layout —
+    /// e.g. the PlcTranspiler importing an L5X export, or callers building add-on
+    /// instruction backing structures.
+    /// </summary>
+    TemplateDefinition AddTemplate(TemplateDefinition template);
+
     /// <summary>Find a template by its instance ID.</summary>
     TemplateDefinition? FindTemplate(ushort instanceId);
 
