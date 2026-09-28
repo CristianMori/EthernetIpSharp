@@ -271,17 +271,16 @@ public static class TagServices
         if (tagType != walked.TypeCode)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2107));
 
-        // BOOL member bit write: read one byte from payload, RMW on host byte.
+        // BOOL member bit write: atomic RMW on the host byte via Interlocked so
+        // two writers to different bits of the same host byte cannot stomp each
+        // other. Cost is a single locked instruction per bit write.
         if (walked.BitPos.HasValue)
         {
             if (elementCount != 1 || data.Length < 5)
                 return CipServiceResponse.Error(serviceCode, CipStatus.Error(0x13));
 
             bool newValue = (span[4] & 0x01) != 0;
-            byte host = tag.GetData(walked.Offset, 1)[0];
-            byte mask = (byte)(1 << walked.BitPos.Value);
-            byte updated = newValue ? (byte)(host | mask) : (byte)(host & ~mask);
-            tag.SetData(new[] { updated }, walked.Offset);
+            tag.AtomicSetBit(walked.Offset, walked.BitPos.Value, newValue);
             return CipServiceResponse.Success(serviceCode);
         }
 

@@ -5,6 +5,12 @@ namespace EthernetIPSharp.Logix;
 /// <summary>
 /// In-memory tag database for the Logix simulator.
 /// Stores tags indexed by name (case-insensitive) and by Symbol Object instance ID.
+///
+/// <para><b>Concurrency.</b>  All internal maps (<c>_byName</c>, <c>_byInstanceId</c>,
+/// <c>_templates</c>, <c>_programs</c>) are <see cref="System.Collections.Concurrent.ConcurrentDictionary{TKey,TValue}"/>
+/// so lookups are safe against concurrent registration. Tag data buffers themselves
+/// are NOT snapshotted — see the concurrency note on <see cref="Tag"/> for the
+/// tearing model.</para>
 /// </summary>
 public sealed class TagDatabase : ITagDatabase
 {
@@ -70,12 +76,25 @@ public sealed class TagDatabase : ITagDatabase
 
     private void RegisterTag(Tag tag)
     {
-        if (!_byName.TryAdd(tag.Name, tag))
-            throw new InvalidOperationException($"Tag '{tag.Name}' already exists");
+        // Order matters. Publish to the instance-id map and fire TagAdded (which
+        // creates the CIP Symbol Object instance in LogixDispatcher.OnTagAdded)
+        // BEFORE the tag becomes discoverable by name. A concurrent CIP request
+        // that resolves the tag via the class-based path (Class=0x6B, Instance=N)
+        // otherwise sees a name-resolvable tag whose CIP instance doesn't exist
+        // yet, returning 0x16 ObjectDoesNotExist instead of the value.
+        //
+        // Name-collision detection is deferred to the last step; rollback removes
+        // the instance-id entry and unsubscribes if that final publish fails.
         _byInstanceId[tag.InstanceId] = tag;
-
         tag.ValueChanged += OnTagValueChanged;
         TagAdded?.Invoke(tag);
+
+        if (!_byName.TryAdd(tag.Name, tag))
+        {
+            _byInstanceId.TryRemove(tag.InstanceId, out _);
+            tag.ValueChanged -= OnTagValueChanged;
+            throw new InvalidOperationException($"Tag '{tag.Name}' already exists");
+        }
     }
 
     private void OnTagValueChanged(Tag tag, TagChangeInfo info)
