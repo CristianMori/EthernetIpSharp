@@ -12,6 +12,13 @@ public sealed class TagDatabase : ITagDatabase
     private readonly ConcurrentDictionary<uint, Tag> _byInstanceId = new();
     private uint _nextInstanceId = 1;
 
+    // Program scopes live alongside controller-scope tags. Each program gets its own
+    // ProgramScope with its own name and instance-id space. The pseudo-instance ids
+    // used for the controller-scope Program:<name> stubs come from a distinct
+    // reserved range (0xF000..0xFFFF) so they never collide with real tag ids.
+    private readonly ConcurrentDictionary<string, ProgramScope> _programs = new(StringComparer.OrdinalIgnoreCase);
+    private uint _nextProgramPseudoId = 0xF000;
+
     /// <summary>Fires when any tag's data changes (from any source).</summary>
     public event Action<Tag, TagChangeInfo>? AnyTagChanged;
 
@@ -94,6 +101,27 @@ public sealed class TagDatabase : ITagDatabase
 
     /// <summary>Number of tags.</summary>
     public int Count => _byName.Count;
+
+    // --- Program scope management ---
+
+    /// <summary>
+    /// Register (or return an existing) named program scope.  Program-scoped tags
+    /// are added through the returned <see cref="ProgramScope"/> and addressed by
+    /// clients as <c>Program:&lt;name&gt;.&lt;tag&gt;</c>.
+    /// </summary>
+    public ProgramScope RegisterProgram(string name) =>
+        _programs.GetOrAdd(name, static (n, self) =>
+        {
+            uint pseudoId = (uint)Interlocked.Increment(ref self._nextProgramPseudoId) - 1;
+            return new ProgramScope(n, pseudoId, self);
+        }, this);
+
+    /// <summary>Look up a program scope by name (case-insensitive).  Returns null if unknown.</summary>
+    public ProgramScope? FindProgram(string name) =>
+        _programs.TryGetValue(name, out var p) ? p : null;
+
+    /// <summary>All registered program scopes.</summary>
+    public IEnumerable<ProgramScope> AllPrograms => _programs.Values;
 
     // --- Template management ---
 

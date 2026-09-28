@@ -119,13 +119,42 @@ public class LogixDispatcher : CipDispatcher
         int firstSymIdx = FindFirstSymbolic(segs);
         if (firstSymIdx >= 0)
         {
-            var rootName = ((SymbolicPathSegment)segs[firstSymIdx]).Name;
-            if (!_symbolCache.TryGetValue(rootName, out var tag))
+            var firstSymName = ((SymbolicPathSegment)segs[firstSymIdx]).Name;
+
+            // Program-scope prefix: "Program:MainProgram" selects the program's own
+            // tag table; the next symbolic segment names the root tag inside it.
+            if (firstSymName.StartsWith("Program:", StringComparison.OrdinalIgnoreCase))
             {
-                tag = Tags.FindByName(rootName);
+                var programName = firstSymName.Substring("Program:".Length);
+                var program = Tags.FindProgram(programName);
+                if (program == null)
+                    return CipServiceResponse.Error(serviceCode, CipStatus.Error(0x05));
+
+                int rootSymIdx = FindNextSymbolic(segs, firstSymIdx + 1);
+                if (rootSymIdx < 0)
+                    return CipServiceResponse.Error(serviceCode, CipStatus.Error(0x05));
+
+                var rootName = ((SymbolicPathSegment)segs[rootSymIdx]).Name;
+                var programTag = program.FindByName(rootName);
+                if (programTag == null)
+                    return CipServiceResponse.Error(serviceCode, CipStatus.Error(0x05));
+
+                var postProgram = CollectPostRoot(segs, rootSymIdx);
+                if (postProgram.Count == 0)
+                    return DispatchTagService(programTag, serviceCode, data, path);
+
+                if (!TagPathWalker.TryWalk(programTag, postProgram, Tags.FindTemplate, out var pwalked, out _))
+                    return CipServiceResponse.Error(serviceCode, CipStatus.Error(0x05));
+                return DispatchTagServiceWalked(programTag, serviceCode, data, pwalked);
+            }
+
+            var rootName2 = firstSymName;
+            if (!_symbolCache.TryGetValue(rootName2, out var tag))
+            {
+                tag = Tags.FindByName(rootName2);
                 if (tag == null)
                     return CipServiceResponse.Error(serviceCode, CipStatus.Error(0x05));
-                _symbolCache[rootName] = tag;
+                _symbolCache[rootName2] = tag;
             }
 
             // Collect post-root segments (member drilling / element indexing).
@@ -162,6 +191,13 @@ public class LogixDispatcher : CipDispatcher
     private static int FindFirstSymbolic(IReadOnlyList<CipPathSegment> segs)
     {
         for (int i = 0; i < segs.Count; i++)
+            if (segs[i] is SymbolicPathSegment) return i;
+        return -1;
+    }
+
+    private static int FindNextSymbolic(IReadOnlyList<CipPathSegment> segs, int from)
+    {
+        for (int i = from; i < segs.Count; i++)
             if (segs[i] is SymbolicPathSegment) return i;
         return -1;
     }

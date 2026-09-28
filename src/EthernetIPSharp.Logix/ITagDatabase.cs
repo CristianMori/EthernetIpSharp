@@ -41,6 +41,15 @@ public interface ITagDatabase
     /// <summary>All template definitions.</summary>
     IEnumerable<TemplateDefinition> AllTemplates { get; }
 
+    /// <summary>Register (or return existing) a named program scope for program-local tags.</summary>
+    ProgramScope RegisterProgram(string name);
+
+    /// <summary>Look up a program scope by name (case-insensitive), or null if unknown.</summary>
+    ProgramScope? FindProgram(string name);
+
+    /// <summary>All registered program scopes.</summary>
+    IEnumerable<ProgramScope> AllPrograms { get; }
+
     /// <summary>Fires when any tag's data changes (from any source — CIP write or application code).</summary>
     event Action<Tag, TagChangeInfo>? AnyTagChanged;
 
