@@ -40,7 +40,13 @@ public static class TagPathWalker
         int elementSize = root.ElementSize;
         int? bitPos = null;
         TemplateDefinition? template = null;
-        int pendingArraySize = 0; // >0 when we just landed on an array and haven't been indexed yet.
+        // Multi-dim array indexing state: pendingDims[pendingDimIdx..] are the dims
+        // still to be indexed, and pendingRunning is the row-major accumulator.
+        // Once fully indexed, offset advances by pendingRunning * elementSize.
+        // A single-dim member array is just Dims = [n].
+        uint[]? pendingDims = null;
+        int pendingDimIdx = 0;
+        long pendingRunning = 0;
 
         // Resolve the initial template if the root is a struct.
         if (LogixDataTypes.IsStruct(root.SymbolType))
@@ -55,10 +61,13 @@ public static class TagPathWalker
             }
         }
 
-        // Root-level array dimension: if the tag has more than one element, the first
-        // element segment indexes into the tag itself.
-        if (root.ElementCount > 1)
-            pendingArraySize = root.ElementCount;
+        // Root-level array shape: if the tag has any Dims, subsequent element
+        // segments index into it.
+        if (root.Dims.Count > 0)
+        {
+            pendingDims = new uint[root.Dims.Count];
+            for (int i = 0; i < root.Dims.Count; i++) pendingDims[i] = root.Dims[i];
+        }
 
         foreach (var seg in segments)
         {
@@ -71,7 +80,7 @@ public static class TagPathWalker
                         result = default;
                         return false;
                     }
-                    if (pendingArraySize > 0)
+                    if (pendingDims != null)
                     {
                         error = $"Cannot drill into array element without an index: '{sym.Name}'";
                         result = default;
@@ -102,7 +111,6 @@ public static class TagPathWalker
                         bitPos = member.ArraySize;
                         elementSize = 1;
                         template = null;
-                        pendingArraySize = 0;
                     }
                     else if (LogixDataTypes.IsStruct(type))
                     {
@@ -115,7 +123,7 @@ public static class TagPathWalker
                             return false;
                         }
                         elementSize = (int)template.StructureSize;
-                        pendingArraySize = member.ArraySize;
+                        SetMemberArrayDim(ref pendingDims, ref pendingDimIdx, ref pendingRunning, member.ArraySize);
                     }
                     else
                     {
@@ -123,7 +131,7 @@ public static class TagPathWalker
                         elementSize = member.ElementSize > 0
                             ? member.ElementSize
                             : LogixDataTypes.GetElementSize(type);
-                        pendingArraySize = member.ArraySize;
+                        SetMemberArrayDim(ref pendingDims, ref pendingDimIdx, ref pendingRunning, member.ArraySize);
                     }
                     break;
 
@@ -134,21 +142,29 @@ public static class TagPathWalker
                         result = default;
                         return false;
                     }
-                    if (pendingArraySize <= 0)
+                    if (pendingDims == null)
                     {
                         error = "Element index on non-array target";
                         result = default;
                         return false;
                     }
-                    if (el.Index >= (uint)pendingArraySize)
+                    if (el.Index >= pendingDims[pendingDimIdx])
                     {
-                        error = $"Element index {el.Index} out of range (size {pendingArraySize})";
+                        error = $"Element index {el.Index} out of range for dim {pendingDimIdx} (size {pendingDims[pendingDimIdx]})";
                         result = default;
                         return false;
                     }
 
-                    offset += (int)el.Index * elementSize;
-                    pendingArraySize = 0;
+                    pendingRunning = pendingRunning * pendingDims[pendingDimIdx] + el.Index;
+                    pendingDimIdx++;
+                    if (pendingDimIdx == pendingDims.Length)
+                    {
+                        // Fully indexed — collapse into byte offset.
+                        offset += (int)(pendingRunning * elementSize);
+                        pendingDims = null;
+                        pendingDimIdx = 0;
+                        pendingRunning = 0;
+                    }
                     break;
 
                 case LogicalPathSegment:
@@ -158,9 +174,33 @@ public static class TagPathWalker
             }
         }
 
+        if (pendingDims != null)
+        {
+            error = $"Under-indexed array: expected {pendingDims.Length} element segments, got {pendingDimIdx}";
+            result = default;
+            return false;
+        }
+
         result = new WalkResult(offset, type, elementSize, bitPos, template);
         error = null;
         return true;
+    }
+
+    private static void SetMemberArrayDim(ref uint[]? pendingDims, ref int pendingDimIdx,
+        ref long pendingRunning, int arraySize)
+    {
+        if (arraySize > 0)
+        {
+            pendingDims = new uint[] { (uint)arraySize };
+            pendingDimIdx = 0;
+            pendingRunning = 0;
+        }
+        else
+        {
+            pendingDims = null;
+            pendingDimIdx = 0;
+            pendingRunning = 0;
+        }
     }
 
     private static bool TryFindMember(TemplateDefinition template, string name, out TemplateMemberInfo member)

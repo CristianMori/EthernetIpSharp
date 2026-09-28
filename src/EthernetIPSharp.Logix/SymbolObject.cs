@@ -225,11 +225,13 @@ public sealed class SymbolObject
                         BinaryPrimitives.WriteUInt32LittleEndian(buffer.AsSpan(offset), 0u);
                         offset += 4;
                         break;
-                    case 8:    // Array Dimensions (3 x UDINT)
-                        uint d1 = tag.ElementCount > 1 ? (uint)tag.ElementCount : 0u;
+                    case 8:    // Array Dimensions (3 x UDINT). Missing dims report 0.
+                        uint d1 = tag.Dims.Count > 0 ? tag.Dims[0] : 0u;
+                        uint d2 = tag.Dims.Count > 1 ? tag.Dims[1] : 0u;
+                        uint d3 = tag.Dims.Count > 2 ? tag.Dims[2] : 0u;
                         BinaryPrimitives.WriteUInt32LittleEndian(buffer.AsSpan(offset),     d1);
-                        BinaryPrimitives.WriteUInt32LittleEndian(buffer.AsSpan(offset + 4), 0u);
-                        BinaryPrimitives.WriteUInt32LittleEndian(buffer.AsSpan(offset + 8), 0u);
+                        BinaryPrimitives.WriteUInt32LittleEndian(buffer.AsSpan(offset + 4), d2);
+                        BinaryPrimitives.WriteUInt32LittleEndian(buffer.AsSpan(offset + 8), d3);
                         offset += 12;
                         break;
                     case 10:   // External Access (USINT). 3 = Read/Write.

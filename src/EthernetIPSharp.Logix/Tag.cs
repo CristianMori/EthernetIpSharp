@@ -44,7 +44,7 @@ public sealed class Tag
     /// </summary>
     public ushort TagType { get; }
 
-    /// <summary>Number of elements (1 for scalars, N for arrays).</summary>
+    /// <summary>Number of elements (1 for scalars, N for arrays; product of <see cref="Dims"/> for multi-dim).</summary>
     public int ElementCount { get; }
 
     /// <summary>Bytes per element.</summary>
@@ -52,6 +52,13 @@ public sealed class Tag
 
     /// <summary>Total data size in bytes.</summary>
     public int DataSize => _data.Length;
+
+    /// <summary>
+    /// Array dimension sizes (empty for scalars, one entry for a 1-D array, up to
+    /// three entries for a Logix multi-dimensional array like <c>DINT[5,10,2]</c>).
+    /// Symbol Object attribute 8 emits these three UDINTs (0-padded).
+    /// </summary>
+    public IReadOnlyList<uint> Dims { get; }
 
     /// <summary>
     /// Fires after any write to this tag's data.
@@ -62,14 +69,26 @@ public sealed class Tag
 
     public Tag(uint instanceId, string name, ushort symbolType, ushort tagType,
                int elementSize, int elementCount = 1)
+        : this(instanceId, name, symbolType, tagType, elementSize,
+               elementCount > 1 ? new uint[] { (uint)elementCount } : Array.Empty<uint>())
+    {
+    }
+
+    /// <summary>Construct a tag with an explicit multi-dimensional array shape.</summary>
+    public Tag(uint instanceId, string name, ushort symbolType, ushort tagType,
+               int elementSize, uint[] dims)
     {
         InstanceId = instanceId;
         Name = name;
         SymbolType = symbolType;
         TagType = tagType;
         ElementSize = elementSize;
-        ElementCount = elementCount;
-        _data = new byte[elementSize * elementCount];
+        Dims = dims;
+
+        long total = 1;
+        for (int i = 0; i < dims.Length; i++) total *= dims[i];
+        ElementCount = dims.Length == 0 ? 1 : (int)total;
+        _data = new byte[elementSize * ElementCount];
     }
 
     /// <summary>Read the entire tag data buffer.</summary>

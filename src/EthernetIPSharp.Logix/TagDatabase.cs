@@ -74,6 +74,43 @@ public sealed class TagDatabase : ITagDatabase
         return tag;
     }
 
+    /// <summary>Add an atomic tag with an explicit multi-dimensional shape (up to 3 dims).</summary>
+    public Tag AddTag(string name, ushort tagType, uint[] dims)
+    {
+        if (dims.Length is < 1 or > 3)
+            throw new ArgumentException("dims.Length must be 1, 2, or 3", nameof(dims));
+        int elementSize = LogixDataTypes.GetElementSize(tagType);
+        if (elementSize < 0)
+            throw new ArgumentException($"Unknown tag type 0x{tagType:X4}", nameof(tagType));
+        ushort symbolType = LogixDataTypes.MakeAtomicSymbolType(tagType, dims.Length);
+        var tag = new Tag(
+            instanceId: Interlocked.Increment(ref _nextInstanceId),
+            name: name,
+            symbolType: symbolType,
+            tagType: tagType,
+            elementSize: elementSize,
+            dims: dims);
+        RegisterTag(tag);
+        return tag;
+    }
+
+    /// <summary>Add a structured tag with an explicit multi-dimensional shape (up to 3 dims).</summary>
+    public Tag AddTag(string name, TemplateDefinition template, uint[] dims)
+    {
+        if (dims.Length is < 1 or > 3)
+            throw new ArgumentException("dims.Length must be 1, 2, or 3", nameof(dims));
+        ushort symbolType = LogixDataTypes.MakeStructSymbolType(template.InstanceId, dims.Length);
+        var tag = new Tag(
+            instanceId: Interlocked.Increment(ref _nextInstanceId),
+            name: name,
+            symbolType: symbolType,
+            tagType: template.StructureHandle,
+            elementSize: (int)template.StructureSize,
+            dims: dims);
+        RegisterTag(tag);
+        return tag;
+    }
+
     private void RegisterTag(Tag tag)
     {
         // Order matters. Publish to the instance-id map and fire TagAdded (which
