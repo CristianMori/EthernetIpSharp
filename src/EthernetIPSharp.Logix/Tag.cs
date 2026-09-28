@@ -117,12 +117,30 @@ public sealed class Tag
         ValueChanged?.Invoke(this, new TagChangeInfo(byteOffset, Unsafe.SizeOf<T>()));
     }
 
+    /// <summary>
+    /// Write a typed value without firing <see cref="ValueChanged"/>.  Intended for
+    /// the transpiler-generated scan loop which does 10⁵–10⁶ writes per scan and
+    /// has no consumer of per-write events.  Same atomicity guarantees as
+    /// <see cref="Write{T}"/> — scalar writes at naturally aligned offsets are
+    /// torn-free on x86/x64.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteSilent<T>(int byteOffset, T value) where T : unmanaged =>
+        Unsafe.WriteUnaligned(ref _data[byteOffset], value);
+
     /// <summary>Bulk write into the tag data buffer. Fires ValueChanged once.</summary>
     public void SetData(ReadOnlySpan<byte> source, int byteOffset = 0)
     {
         int len = Math.Min(source.Length, _data.Length - byteOffset);
         source.Slice(0, len).CopyTo(_data.AsSpan(byteOffset));
         ValueChanged?.Invoke(this, new TagChangeInfo(byteOffset, len));
+    }
+
+    /// <summary>Bulk write without firing <see cref="ValueChanged"/>.</summary>
+    public void SetDataSilent(ReadOnlySpan<byte> source, int byteOffset = 0)
+    {
+        int len = Math.Min(source.Length, _data.Length - byteOffset);
+        source.Slice(0, len).CopyTo(_data.AsSpan(byteOffset));
     }
 
     /// <summary>

@@ -150,8 +150,48 @@ public sealed class TagDatabase : ITagDatabase
         }
     }
 
+    /// <summary>
+    /// When true, per-write events (<see cref="Tag.ValueChanged"/> forwarded to
+    /// <see cref="AnyTagChanged"/>) are suppressed globally.  Cheaper than
+    /// unsubscribing per tag when the transpiler-generated scan simply doesn't
+    /// want any subscriber to see per-write callbacks.  Dirty tracking (see
+    /// <see cref="EnableDirtyTracking"/>) is also skipped while suppressed.
+    /// </summary>
+    public bool SuppressEvents { get; set; }
+
+    private ConcurrentDictionary<uint, byte>? _dirtyTags;
+
+    /// <summary>
+    /// Enable per-tag dirty tracking.  Any tag whose <see cref="Tag.ValueChanged"/>
+    /// fires while this is on is recorded once (its instance id) until
+    /// <see cref="DrainDirty"/> is called, which returns and clears the set.
+    /// Off by default; the transpiler-generated scan enables it only when an
+    /// observer actually needs periodic notifications (e.g. a display cache
+    /// refresh at scan boundaries).
+    /// </summary>
+    public void EnableDirtyTracking() => _dirtyTags ??= new ConcurrentDictionary<uint, byte>();
+
+    /// <summary>Turn dirty tracking off and discard the accumulated set.</summary>
+    public void DisableDirtyTracking() => _dirtyTags = null;
+
+    /// <summary>
+    /// Snapshot the accumulated dirty tag ids and clear the set.  Empty when
+    /// dirty tracking is off.
+    /// </summary>
+    public IReadOnlyCollection<uint> DrainDirty()
+    {
+        var d = _dirtyTags;
+        if (d == null || d.IsEmpty) return Array.Empty<uint>();
+        var snapshot = new List<uint>(d.Count);
+        foreach (var kv in d) snapshot.Add(kv.Key);
+        foreach (var id in snapshot) d.TryRemove(id, out _);
+        return snapshot;
+    }
+
     private void OnTagValueChanged(Tag tag, TagChangeInfo info)
     {
+        if (SuppressEvents) return;
+        _dirtyTags?.TryAdd(tag.InstanceId, 0);
         AnyTagChanged?.Invoke(tag, info);
     }
 
