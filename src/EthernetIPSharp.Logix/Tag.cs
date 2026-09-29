@@ -61,6 +61,13 @@ public sealed class Tag
     public IReadOnlyList<uint> Dims { get; }
 
     /// <summary>
+    /// The <see cref="TemplateDefinition"/> backing this tag when it is a
+    /// structure, or <c>null</c> for atomic tags.  Lets a view layer walk member
+    /// offsets without re-querying <c>TagDatabase.FindTemplate</c>.
+    /// </summary>
+    public TemplateDefinition? Template { get; internal set; }
+
+    /// <summary>
     /// Fires after any write to this tag's data.
     /// Callback receives the tag and info about what changed.
     /// WARNING: May fire on any thread (including the TCP handler thread).

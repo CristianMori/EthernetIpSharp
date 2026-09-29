@@ -1,0 +1,13 @@
+<Project>
+  <!--
+    Apply to every library project under src/.  Turns on XML doc file
+    generation so the NuGet rollup harvester (packaging/EthernetIPSharp.Nuget)
+    can package IntelliSense XML alongside each .dll/.pdb, and silences the
+    CS1591 flood for public members that don't yet have doc comments.
+    Individual projects can override any of these in their own PropertyGroup.
+  -->
+  <PropertyGroup>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+</Project>

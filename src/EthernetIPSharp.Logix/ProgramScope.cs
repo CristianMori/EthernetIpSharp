@@ -72,7 +72,8 @@ public sealed class ProgramScope
             symbolType: symbolType,
             tagType: template.StructureHandle,
             elementSize: (int)template.StructureSize,
-            elementCount: elementCount);
+            elementCount: elementCount)
+        { Template = template };
         Register(tag);
         return tag;
     }

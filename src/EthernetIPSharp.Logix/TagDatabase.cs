@@ -84,7 +84,8 @@ public sealed class TagDatabase : ITagDatabase
             symbolType: symbolType,
             tagType: template.StructureHandle,
             elementSize: (int)template.StructureSize,
-            elementCount: elementCount);
+            elementCount: elementCount)
+        { Template = template };
 
         RegisterTag(tag);
         return tag;
@@ -122,7 +123,8 @@ public sealed class TagDatabase : ITagDatabase
             symbolType: symbolType,
             tagType: template.StructureHandle,
             elementSize: (int)template.StructureSize,
-            dims: dims);
+            dims: dims)
+        { Template = template };
         RegisterTag(tag);
         return tag;
     }
