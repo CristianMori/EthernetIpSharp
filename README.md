@@ -58,6 +58,19 @@ The library is layered into independent projects so you can use only the parts y
 - Opt-in Class 3 connected explicit messaging (`useConnected: true`) — opens a Forward_Open at connect time, every read/write rides `SendUnitData` instead of UCMM
 - Instance-ID cache populated transparently by `BrowseTagsAsync` so subsequent reads send a 6-byte Symbol Object segment instead of the longer ANSI symbolic name
 - `TagClient` for connecting to a real PLC and reading/writing tags by name
+- `EipScanner.SendGenericAsync(service, class, instance, attribute?, data, route?)` — idiomatic CIP request wrapper with optional `Unconnected_Send` routing
+
+**Logix tag server (Studio-5000-compatible)**
+- Program-scoped tags — `Program:Cell.Timer1.PRE` resolves to the program's own tag table with per-program instance-id space
+- Nested UDT templates with pre-resolved layout registration (`AddTemplate(TemplateDefinition)`) — the transpiler escape hatch for L5X exports including AOI backing structures (32-per-DINT BOOL packing) and STRING
+- Member / element / BOOL-bit path walker — a CIP request for `Motor.Timer.PRE`, `Motor.DN`, or `Line[2].Speed` returns the right bytes with the right type code
+- Multi-dimensional arrays (`DINT[5,10,4]`) with row-major indexing and under-index detection
+- DWORD-packed BOOL arrays (`BOOL[32]` occupies 4 bytes; `Flags[5]` addresses bit 5 of byte 0)
+- Atomic BOOL bit RMW via `Interlocked.Or/And` on the containing 4-byte word — concurrent writers to different bits of the same host byte can't stomp each other
+- `WriteSilent<T>`, `SetDataSilent`, `SuppressEvents` for the transpiler-generated scan loop that writes 10⁵–10⁶ times per scan without any consumer for per-write events
+- Optional dirty-tag tracking with `EnableDirtyTracking()` / `DrainDirty()` for observers that only care about which tags changed
+- Save / load — `TagDatabasePersistence` writes a compact binary snapshot of every tag buffer, byte-for-byte compatible with the Rust, Python, and C++ ports (same magic + version + LE fields)
+- Documented tearing model: aligned scalar reads/writes are atomic on x86/x64, multi-scalar struct reads may tear (matches 1756 behavior; clients coordinate via application-level flags)
 
 **Diagnostics**
 - Connection lifecycle events
@@ -326,11 +339,25 @@ for (int i = 0; i < 10_000; i++)
 ```csharp
 var logix = new LogixDispatcher();
 
+// Atomic tags (scalars, 1-D arrays, multi-dim arrays, DWORD-packed BOOL arrays).
 logix.Tags.AddTag("rate", LogixDataTypes.DINT).Write(0, 1500);
-logix.Tags.AddTag("temperature", LogixDataTypes.REAL).Write(0, 72.5f);
 logix.Tags.AddTag("counts", LogixDataTypes.INT, elementCount: 100);
+logix.Tags.AddTag("Matrix", LogixDataTypes.DINT, new uint[] { 5, 10, 4 });
+logix.Tags.AddTag("Flags", LogixDataTypes.BOOL, elementCount: 32);   // 4 bytes, DWORD-packed
 
-// React to client writes
+// UDTs and structured tags — resolves member drilling, BOOL bits, arrays of structs.
+var timer = logix.Tags.AddTemplate("Timer",
+    new TemplateMember("PRE", LogixDataTypes.DINT),
+    new TemplateMember("ACC", LogixDataTypes.DINT),
+    new TemplateMember("EN",  LogixDataTypes.BOOL),
+    new TemplateMember("DN",  LogixDataTypes.BOOL));
+logix.Tags.AddTag("MyTimer", timer);
+
+// Program-scoped tags — clients address these as Program:Cell.Rate.
+var cell = logix.Tags.RegisterProgram("Cell");
+cell.AddTag("Rate", LogixDataTypes.DINT);
+
+// React to client writes (or suppress the event path for a high-throughput scan).
 logix.Tags.FindByName("rate")!.ValueChanged += (tag, change) =>
     Console.WriteLine($"rate = {tag.Read<int>()}");
 
@@ -532,9 +559,10 @@ Set `ETHERNETIPSHARP_LAG_CSV=1` before launching the adapter to write per-iterat
 ## Known limitations
 
 - 10 ms RPI runs stably for hours on Windows with the NIC tuning above. Tighter RPIs (≤ 5 ms) likely require MMCSS Pro Audio or BIOS C-state disable.
-- No persistent storage — assembly contents and tag values are in-memory only.
+- Assembly Object contents are in-memory only (tag values persist via `TagDatabasePersistence.Save`/`Load`).
 - Originator-side connection bridging through multiple hops is not implemented.
 - Safety reset / safety configuration apply services are wired in but not extensively interop-tested.
+- Structure handles are `0x8000 | instance_id` for auto-registered UDTs; pre-resolved templates carry whatever handle the caller supplies. A Logix-style CRC over the template definition is available (`CipCrc16.Calc`) but not yet wired into `AddTemplate` — needs a live Studio 5000 capture to confirm the exact byte range hashed for UDTs with arrays / structs / BOOLs.
 
 ---
 
