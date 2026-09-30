@@ -87,6 +87,71 @@ public sealed class Tag
     }
 
     public override string ToString() => $"{Name} ({ElementCount}x{ElementSize}B, type=0x{TagType:X4})";
+    
+    public bool IsSString => (TagType & 0x00FF) == LogixDataTypes.SHORT_STRING;
+
+    public string ReadSString()
+    {
+        if (!IsSString)
+        {
+            throw new InvalidOperationException(
+                $"Tag '{Name}' is not a SHORT_STRING tag."
+            );
+        }
+
+        if (_data.Length < LogixDataTypes.ShortStringStorageSize)
+        {
+            throw new InvalidOperationException(
+                $"Tag '{Name}' has an invalid SHORT_STRING buffer."
+            );
+        }
+
+        // Truncate output if somehow string is too big in memory.
+        int length = Math.Min((int)_data[0], LogixDataTypes.ShortStringMaxLength);
+        return Encoding.ASCII.GetString(_data, 1, length);
+    }
+
+    public void WriteSString(string value)
+    {
+        if (!IsSString)
+        {
+            throw new InvalidOperationException(
+                $"Tag '{Name}' is not a SHORT_STRING tag."
+            );
+        }
+
+        ArgumentNullException.ThrowIfNull(value);
+
+        if (value.Length > LogixDataTypes.ShortStringMaxLength)
+        {
+            throw new ArgumentException(
+                $"SHORT_STRING supports a maximum of " +
+                $"{LogixDataTypes.ShortStringMaxLength} characters.",
+                nameof(value)
+            );
+        }
+
+        // SHORT_STRING is one byte per character.
+        if (value.Any(c => c > 0x7F))
+        {
+            throw new ArgumentException(
+                "SHORT_STRING values must contain ASCII characters.",
+                nameof(value)
+            );
+        }
+
+        byte[] characters = Encoding.ASCII.GetBytes(value);
+
+        Array.Clear(_data, 0, _data.Length);
+
+        // Byte 0 is the character count.
+        _data[0] = checked((byte)characters.Length);
+
+        // Bytes 1..80 contain the character data.
+        characters.CopyTo(_data, 1);
+
+        ValueChanged?.Invoke(this, new TagChangeInfo(0, _data.Length));
+    }
 }
 
 /// <summary>Describes which region of a tag's data was modified.</summary>
