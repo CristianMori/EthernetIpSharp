@@ -88,22 +88,36 @@ public static class TagServices
     /// Request: element_count (UINT) + byte_offset (UDINT)
     /// Reply: tag_type (UINT) + data bytes (status 0x06 if more data remains)
     /// </summary>
-    public static CipServiceResponse HandleReadTagFragmented(Tag tag, byte serviceCode, ReadOnlyMemory<byte> data)
+    public static CipServiceResponse HandleReadTagFragmented(
+        Tag tag, 
+        byte serviceCode, 
+        ReadOnlyMemory<byte> data, 
+        int elementOffset = 0)
     {
         if (data.Length < 6)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0x13));
+        if (elementOffset < 0)
+            return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2105));
 
         var span = data.Span;
         ushort elementCount = BinaryPrimitives.ReadUInt16LittleEndian(span);
-        uint byteOffset = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(2));
+        uint fragmentOffset = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(2));
 
+        if (elementCount == 0)
+            elementCount = 1;
+
+        int elementBaseOffset = elementOffset * tag.ElementSize;
         int totalBytes = elementCount * tag.ElementSize;
-        if (byteOffset >= (uint)totalBytes)
+
+        if (elementBaseOffset < 0 || elementBaseOffset + totalBytes > tag.DataSize)
+            return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2105));
+        if (fragmentOffset >= (uint)totalBytes)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2105));
 
-        int remaining = totalBytes - (int)byteOffset;
+        int remaining = totalBytes - (int)fragmentOffset;
         int chunkSize = Math.Min(remaining, MaxReplyData - 2);
-        bool moreData = (int)byteOffset + chunkSize < totalBytes;
+        int byteOffset = elementBaseOffset + (int)fragmentOffset;
+        bool moreData = (int)fragmentOffset + chunkSize < totalBytes;
 
         return BuildReadResponse(tag, serviceCode, (int)byteOffset, chunkSize, isPartial: moreData);
     }
@@ -113,24 +127,38 @@ public static class TagServices
     /// Request: tag_type (UINT) + element_count (UINT) + byte_offset (UDINT) + data
     /// Reply: (empty on success)
     /// </summary>
-    public static CipServiceResponse HandleWriteTagFragmented(Tag tag, byte serviceCode, ReadOnlyMemory<byte> data)
+    public static CipServiceResponse HandleWriteTagFragmented(
+        Tag tag,
+        byte serviceCode,
+        ReadOnlyMemory<byte> data,
+        int elementOffset = 0)
     {
         if (data.Length < 8)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0x13));
+        if (elementOffset < 0)
+            return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2105));
 
         var span = data.Span;
         ushort tagType = BinaryPrimitives.ReadUInt16LittleEndian(span);
         ushort elementCount = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(2));
-        uint byteOffset = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(4));
+        uint fragmentOffset = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(4));
 
         if (tagType != tag.TagType)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2107));
+        
+        if (elementCount == 0)
+            elementCount = 1;
 
+        int elementBaseOffset = elementOffset * tag.ElementSize;
         int totalBytes = elementCount * tag.ElementSize;
-        if (byteOffset + (uint)(data.Length - 8) > (uint)totalBytes)
-            return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2104));
 
         int writeLen = data.Length - 8;
+        if (fragmentOffset + (uint)writeLen > (uint)totalBytes)
+            return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2104));
+        int byteOffset = elementBaseOffset + (int)fragmentOffset;
+        if (byteOffset < 0 ||
+            byteOffset + writeLen > tag.DataSize)
+            return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2105));
         tag.SetData(span.Slice(8, writeLen), (int)byteOffset);
 
         return CipServiceResponse.Success(serviceCode);

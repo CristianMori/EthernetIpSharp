@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Text;
 
 namespace EthernetIPSharp.Logix;
 
@@ -87,6 +88,89 @@ public sealed class Tag
     }
 
     public override string ToString() => $"{Name} ({ElementCount}x{ElementSize}B, type=0x{TagType:X4})";
+    
+    public bool IsSString => (TagType & 0x00FF) == LogixDataTypes.SHORT_STRING;
+
+    public string ReadSString(int elementIndex = 0)
+    {
+        if (!IsSString)
+        {
+            throw new InvalidOperationException(
+                $"Tag '{Name}' is not a SHORT_STRING tag."
+            );
+        }
+
+        if (elementIndex < 0 || elementIndex >= ElementCount)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(elementIndex),
+                $"Element index {elementIndex} is outside " +
+                $"the range 0..{ElementCount - 1}.");
+        }
+
+        int offset = elementIndex * ElementSize;
+
+        // Truncate output if somehow string is too big in memory.
+        int length = Math.Min((int)_data[offset], LogixDataTypes.ShortStringMaxLength);
+        return Encoding.ASCII.GetString(_data, offset+1, length);
+    }
+
+    public void WriteSString(int elementIndex, string value)
+    {
+        if (!IsSString)
+        {
+            throw new InvalidOperationException(
+                $"Tag '{Name}' is not a SHORT_STRING tag."
+            );
+        }
+
+        ArgumentNullException.ThrowIfNull(value);
+
+        if (elementIndex < 0 || elementIndex >= ElementCount)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(elementIndex),
+                $"Element index {elementIndex} is outside " +
+                $"the range 0..{ElementCount - 1}.");
+        }
+
+        if (value.Length > LogixDataTypes.ShortStringMaxLength)
+        {
+            throw new ArgumentException(
+                $"SHORT_STRING supports a maximum of " +
+                $"{LogixDataTypes.ShortStringMaxLength} characters.",
+                nameof(value)
+            );
+        }
+
+        // SHORT_STRING is one byte per character.
+        if (value.Any(c => c > 0x7F))
+        {
+            throw new ArgumentException(
+                "SHORT_STRING values must contain ASCII characters.",
+                nameof(value)
+            );
+        }
+
+        byte[] characters = Encoding.ASCII.GetBytes(value);
+
+        int offset = elementIndex * ElementSize;
+
+        Array.Clear(_data, offset, ElementSize);
+
+        // Byte 0 is the character count.
+        _data[offset] = (byte)characters.Length;
+
+        // Bytes 1..80 contain the character data.
+        characters.CopyTo(_data, offset + 1);
+
+        ValueChanged?.Invoke(this, new TagChangeInfo(offset, _data.Length));
+    }
+
+    public void WriteSString(string value)
+    {
+        WriteSString(0, value);
+    }
 }
 
 /// <summary>Describes which region of a tag's data was modified.</summary>

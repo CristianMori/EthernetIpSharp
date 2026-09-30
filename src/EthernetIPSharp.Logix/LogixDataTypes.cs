@@ -35,6 +35,15 @@ public static class LogixDataTypes
     public const ushort LREAL = 0x00CB;
     /// <summary>DWORD — 32-bit bit string, 4 bytes.</summary>
     public const ushort DWORD = 0x00D3;
+    /// <summary>SHORT_STRING - 648-bit bit string, 81 bytes. (one length byte plus up to 80 characters)</summary>
+    public const ushort SHORT_STRING = 0x00DA;
+
+    // --- SHORT_STRING tag layout ---
+    
+    /// <summary>Maximum number of characters in a SHORT_STRING.</summary>
+    public const int ShortStringMaxLength = 80;
+    /// <summary>Wire storage size: one length byte plus up to 80 characters.</summary>
+    public const int ShortStringStorageSize = 1 + ShortStringMaxLength;
 
     // --- Logix STRING structure layout ---
 
@@ -68,6 +77,7 @@ public static class LogixDataTypes
             0xCA => 4,  // REAL
             0xCB => 8,  // LREAL
             0xD3 => 4,  // DWORD
+            0xDA => ShortStringStorageSize, // SHORT_STRING
             _ => -1,
         };
     }

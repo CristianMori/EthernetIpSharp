@@ -136,8 +136,8 @@ public class LogixDispatcher : CipDispatcher
         {
             TagServices.ReadTag => TagServices.HandleReadTag(tag, serviceCode, data, elementOffset),
             TagServices.WriteTag => TagServices.HandleWriteTag(tag, serviceCode, data, elementOffset),
-            TagServices.ReadTagFragmented => TagServices.HandleReadTagFragmented(tag, serviceCode, data),
-            TagServices.WriteTagFragmented => TagServices.HandleWriteTagFragmented(tag, serviceCode, data),
+            TagServices.ReadTagFragmented => TagServices.HandleReadTagFragmented(tag, serviceCode, data, elementOffset),
+            TagServices.WriteTagFragmented => TagServices.HandleWriteTagFragmented(tag, serviceCode, data, elementOffset),
             TagServices.ReadModifyWrite => TagServices.HandleReadModifyWrite(tag, serviceCode, data),
             _ => CipServiceResponse.Error(serviceCode, CipStatus.Error(CipStatus.ServiceNotSupported)),
         };
