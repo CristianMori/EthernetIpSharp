@@ -91,7 +91,7 @@ public sealed class Tag
     
     public bool IsSString => (TagType & 0x00FF) == LogixDataTypes.SHORT_STRING;
 
-    public string ReadSString()
+    public string ReadSString(int elementIndex = 0)
     {
         if (!IsSString)
         {
@@ -100,19 +100,22 @@ public sealed class Tag
             );
         }
 
-        if (_data.Length < LogixDataTypes.ShortStringStorageSize)
+        if (elementIndex < 0 || elementIndex >= ElementCount)
         {
-            throw new InvalidOperationException(
-                $"Tag '{Name}' has an invalid SHORT_STRING buffer."
-            );
+            throw new ArgumentOutOfRangeException(
+                nameof(elementIndex),
+                $"Element index {elementIndex} is outside " +
+                $"the range 0..{ElementCount - 1}.");
         }
 
+        int offset = elementIndex * ElementSize;
+
         // Truncate output if somehow string is too big in memory.
-        int length = Math.Min((int)_data[0], LogixDataTypes.ShortStringMaxLength);
-        return Encoding.ASCII.GetString(_data, 1, length);
+        int length = Math.Min((int)_data[offset], LogixDataTypes.ShortStringMaxLength);
+        return Encoding.ASCII.GetString(_data, offset+1, length);
     }
 
-    public void WriteSString(string value)
+    public void WriteSString(int elementIndex, string value)
     {
         if (!IsSString)
         {
@@ -122,6 +125,14 @@ public sealed class Tag
         }
 
         ArgumentNullException.ThrowIfNull(value);
+
+        if (elementIndex < 0 || elementIndex >= ElementCount)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(elementIndex),
+                $"Element index {elementIndex} is outside " +
+                $"the range 0..{ElementCount - 1}.");
+        }
 
         if (value.Length > LogixDataTypes.ShortStringMaxLength)
         {
@@ -143,15 +154,22 @@ public sealed class Tag
 
         byte[] characters = Encoding.ASCII.GetBytes(value);
 
-        Array.Clear(_data, 0, _data.Length);
+        int offset = elementIndex * ElementSize;
+
+        Array.Clear(_data, offset, ElementSize);
 
         // Byte 0 is the character count.
-        _data[0] = checked((byte)characters.Length);
+        _data[offset] = (byte)characters.Length;
 
         // Bytes 1..80 contain the character data.
-        characters.CopyTo(_data, 1);
+        characters.CopyTo(_data, offset + 1);
 
-        ValueChanged?.Invoke(this, new TagChangeInfo(0, _data.Length));
+        ValueChanged?.Invoke(this, new TagChangeInfo(offset, _data.Length));
+    }
+
+    public void WriteSString(string value)
+    {
+        WriteSString(0, value);
     }
 }
 
