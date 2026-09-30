@@ -35,6 +35,8 @@ public static class LogixDataTypes
     public const ushort LREAL = 0x00CB;
     /// <summary>DWORD — 32-bit bit string, 4 bytes.</summary>
     public const ushort DWORD = 0x00D3;
+    /// <summary>SHORT_STRING - 648-bit bit string, 81 bytes. (one length byte plus up to 80 characters)</summary>
+    public const ushort SHORT_STRING = 0x00DA;
 
     // --- Logix STRING structure layout ---
 
@@ -68,6 +70,7 @@ public static class LogixDataTypes
             0xCA => 4,  // REAL
             0xCB => 8,  // LREAL
             0xD3 => 4,  // DWORD
+            0xDA => 81, // SHORT_STRING
             _ => -1,
         };
     }
