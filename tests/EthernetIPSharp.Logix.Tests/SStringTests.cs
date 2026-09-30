@@ -183,6 +183,104 @@ public sealed class SStringTests : IAsyncLifetime
         Assert.Equal(newValue, _asset.ReadSString());
     }
 
+    [Fact]
+    public async Task FragmentedRead_ArrayElement_UsesRequestedElement()
+    {
+        var assets = _logix.Tags.AddTag(
+            "assets",
+            LogixDataTypes.SHORT_STRING,
+            elementCount: 3);
+
+        assets.WriteSString(0, "zero");
+        assets.WriteSString(1, "one");
+        assets.WriteSString(2, "two");
+
+        using var client = new TcpClient();
+        await client.ConnectAsync(IPAddress.Loopback, _tcpPort);
+
+        NetworkStream stream = client.GetStream();
+        uint session = await RegisterSessionAsync(stream);
+
+        // ASSET[1], then fragmented byte offset 0.
+        byte[] path = BuildSymbolicPath("assets");
+        path = AppendElementSegment(path, 1);
+
+        byte[] requestData =
+        {
+            0x01, 0x00, // one element
+            0x00, 0x00, 0x00, 0x00 // fragment offset = 0
+        };
+
+        var (status, data) = await SendCipServiceAsync(
+            stream,
+            session,
+            TagServices.ReadTagFragmented,
+            path,
+            requestData);
+
+        Assert.Equal(0, status);
+
+        ushort type =
+            BinaryPrimitives.ReadUInt16LittleEndian(data);
+
+        Assert.Equal(
+            LogixDataTypes.SHORT_STRING,
+            type);
+
+        Assert.Equal(
+            "one",
+            Encoding.ASCII.GetString(
+                data,
+                3,
+                data[2]));
+    }
+
+    private static byte[] AppendElementSegment(byte[] path, uint elementIndex)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+
+        if ((path.Length & 1) != 0)
+            throw new ArgumentException("The existing CIP path must have an even byte length.", nameof(path));
+
+        if (elementIndex <= byte.MaxValue)
+        {
+            var result = new byte[path.Length + 2];
+            path.CopyTo(result, 0);
+
+            // Logical Element ID, 8-bit format.
+            result[path.Length] = 0x28;
+            result[path.Length + 1] = (byte)elementIndex;
+            return result;
+        }
+
+        if (elementIndex <= ushort.MaxValue)
+        {
+            var result = new byte[path.Length + 4];
+            path.CopyTo(result, 0);
+
+            // Logical Element ID, 16-bit format.
+            result[path.Length] = 0x29;
+            result[path.Length + 1] = 0x00; // pad
+            BinaryPrimitives.WriteUInt16LittleEndian(
+                result.AsSpan(path.Length + 2),
+                (ushort)elementIndex);
+            return result;
+        }
+
+        {
+            var result = new byte[path.Length + 6];
+            path.CopyTo(result, 0);
+
+            // Logical Element ID, 32-bit format.
+            result[path.Length] = 0x2A;
+            result[path.Length + 1] = 0x00; // pad
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                result.AsSpan(path.Length + 2),
+                elementIndex);
+            return result;
+        }
+    }
+
     private static byte[] BuildSymbolicPath(string name)
     {
         int paddedLength = name.Length % 2 == 0
