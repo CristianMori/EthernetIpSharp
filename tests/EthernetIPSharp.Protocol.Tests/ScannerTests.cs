@@ -75,6 +75,39 @@ public class ScannerTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Scanner_ReadsIdentityViaSendGenericAsync()
+    {
+        // Same request as above but through the idiomatic SendGenericAsync
+        // helper — no hand-encoded EPATH, no route (bare MR).
+        await using var scanner = new EipScanner();
+        await scanner.ConnectAsync(IPAddress.Loopback, _tcpPort);
+
+        var response = await scanner.SendGenericAsync(
+            serviceCode: 0x0E,      // Get_Attribute_Single
+            classId: 0x01,          // Identity
+            instanceId: 1,
+            attributeId: 1);        // Vendor ID
+
+        Assert.True(response.Status.IsSuccess, $"status=0x{response.Status.GeneralStatus:X2}");
+        var vendorId = BinaryPrimitives.ReadUInt16LittleEndian(response.Data.Span);
+        Assert.Equal(42, vendorId);
+    }
+
+    [Fact]
+    public async Task Scanner_SendGenericAsync_WithData_Get_Attribute_All()
+    {
+        // Get_Attribute_All on Identity — no request data, larger response.
+        await using var scanner = new EipScanner();
+        await scanner.ConnectAsync(IPAddress.Loopback, _tcpPort);
+
+        var response = await scanner.SendGenericAsync(0x01, 0x01, 1);
+
+        Assert.True(response.Status.IsSuccess, $"status=0x{response.Status.GeneralStatus:X2}");
+        // First UINT of the Identity Get_Attribute_All reply is the vendor id.
+        Assert.Equal(42, BinaryPrimitives.ReadUInt16LittleEndian(response.Data.Span));
+    }
+
+    [Fact]
     public async Task Scanner_ForwardOpen_EstablishesIoConnection()
     {
         await using var scanner = new EipScanner();

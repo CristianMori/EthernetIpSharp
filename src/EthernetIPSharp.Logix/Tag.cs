@@ -1,10 +1,24 @@
 using System.Runtime.CompilerServices;
+using System.Threading;
 
 namespace EthernetIPSharp.Logix;
 
 /// <summary>
 /// Represents a single Logix controller tag with a data buffer and change notifications.
 /// Each tag corresponds to one instance of the Symbol Object (class 0x6B).
+///
+/// <para><b>Concurrency model.</b>  This mirrors real Logix 1756/1769 semantics:
+/// tag memory is a plain byte buffer with no snapshot boundary.  Scalar reads and
+/// writes on naturally aligned offsets (DINT at %4, REAL at %4, LINT at %8) are
+/// atomic on x86/x64.  Multi-scalar and struct reads MAY tear if a scan-side writer
+/// races with a CIP-side reader; that is how a 1756 behaves too, and clients that
+/// need coherent multi-member reads coordinate via an application-level flag rather
+/// than expecting the controller to snapshot.  Do NOT wrap the read/write path in
+/// a lock — the scan-side transpiler-generated code writes 10⁵–10⁶ times per scan
+/// and cannot afford it.  The one place synchronization IS worthwhile is BOOL bit
+/// RMW on a host byte shared by multiple BOOL members; use <see cref="AtomicSetBit"/>
+/// for those writes to prevent two writers to different bits from stomping each
+/// other.</para>
 /// </summary>
 public sealed class Tag
 {
@@ -30,7 +44,7 @@ public sealed class Tag
     /// </summary>
     public ushort TagType { get; }
 
-    /// <summary>Number of elements (1 for scalars, N for arrays).</summary>
+    /// <summary>Number of elements (1 for scalars, N for arrays; product of <see cref="Dims"/> for multi-dim).</summary>
     public int ElementCount { get; }
 
     /// <summary>Bytes per element.</summary>
@@ -38,6 +52,20 @@ public sealed class Tag
 
     /// <summary>Total data size in bytes.</summary>
     public int DataSize => _data.Length;
+
+    /// <summary>
+    /// Array dimension sizes (empty for scalars, one entry for a 1-D array, up to
+    /// three entries for a Logix multi-dimensional array like <c>DINT[5,10,2]</c>).
+    /// Symbol Object attribute 8 emits these three UDINTs (0-padded).
+    /// </summary>
+    public IReadOnlyList<uint> Dims { get; }
+
+    /// <summary>
+    /// The <see cref="TemplateDefinition"/> backing this tag when it is a
+    /// structure, or <c>null</c> for atomic tags.  Lets a view layer walk member
+    /// offsets without re-querying <c>TagDatabase.FindTemplate</c>.
+    /// </summary>
+    public TemplateDefinition? Template { get; internal set; }
 
     /// <summary>
     /// Fires after any write to this tag's data.
@@ -48,14 +76,32 @@ public sealed class Tag
 
     public Tag(uint instanceId, string name, ushort symbolType, ushort tagType,
                int elementSize, int elementCount = 1)
+        : this(instanceId, name, symbolType, tagType, elementSize,
+               elementCount > 1 ? new uint[] { (uint)elementCount } : Array.Empty<uint>())
+    {
+    }
+
+    /// <summary>
+    /// Construct a tag with an explicit multi-dimensional array shape.  Pass
+    /// <paramref name="dataSize"/> only when the storage layout is not simply
+    /// <c>elementSize * product(dims)</c> — used by BOOL arrays where the logical
+    /// element count is the bit count but storage is DWORD-packed
+    /// (ceil(bits/32) * 4 bytes).
+    /// </summary>
+    public Tag(uint instanceId, string name, ushort symbolType, ushort tagType,
+               int elementSize, uint[] dims, int? dataSize = null)
     {
         InstanceId = instanceId;
         Name = name;
         SymbolType = symbolType;
         TagType = tagType;
         ElementSize = elementSize;
-        ElementCount = elementCount;
-        _data = new byte[elementSize * elementCount];
+        Dims = dims;
+
+        long total = 1;
+        for (int i = 0; i < dims.Length; i++) total *= dims[i];
+        ElementCount = dims.Length == 0 ? 1 : (int)total;
+        _data = new byte[dataSize ?? elementSize * ElementCount];
     }
 
     /// <summary>Read the entire tag data buffer.</summary>
@@ -78,12 +124,71 @@ public sealed class Tag
         ValueChanged?.Invoke(this, new TagChangeInfo(byteOffset, Unsafe.SizeOf<T>()));
     }
 
+    /// <summary>
+    /// Write a typed value without firing <see cref="ValueChanged"/>.  Intended for
+    /// the transpiler-generated scan loop which does 10⁵–10⁶ writes per scan and
+    /// has no consumer of per-write events.  Same atomicity guarantees as
+    /// <see cref="Write{T}"/> — scalar writes at naturally aligned offsets are
+    /// torn-free on x86/x64.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteSilent<T>(int byteOffset, T value) where T : unmanaged =>
+        Unsafe.WriteUnaligned(ref _data[byteOffset], value);
+
     /// <summary>Bulk write into the tag data buffer. Fires ValueChanged once.</summary>
     public void SetData(ReadOnlySpan<byte> source, int byteOffset = 0)
     {
         int len = Math.Min(source.Length, _data.Length - byteOffset);
         source.Slice(0, len).CopyTo(_data.AsSpan(byteOffset));
         ValueChanged?.Invoke(this, new TagChangeInfo(byteOffset, len));
+    }
+
+    /// <summary>Bulk write without firing <see cref="ValueChanged"/>.</summary>
+    public void SetDataSilent(ReadOnlySpan<byte> source, int byteOffset = 0)
+    {
+        int len = Math.Min(source.Length, _data.Length - byteOffset);
+        source.Slice(0, len).CopyTo(_data.AsSpan(byteOffset));
+    }
+
+    /// <summary>
+    /// Atomically set or clear a single bit inside the tag's data buffer.  Used for
+    /// BOOL member writes where multiple BOOLs share a host byte — a non-atomic
+    /// read/modify/write would allow two concurrent writers to different bits to
+    /// stomp each other.
+    ///
+    /// The implementation reinterprets the containing 4-byte aligned word as a
+    /// <c>ref uint</c> and calls <see cref="Interlocked.Or(ref uint, uint)"/> /
+    /// <see cref="Interlocked.And(ref uint, uint)"/>.  ValueChanged fires with the
+    /// single-byte range of the host byte.
+    /// </summary>
+    public void AtomicSetBit(int byteOffset, int bitPos, bool value)
+    {
+        if ((uint)bitPos > 7) throw new ArgumentOutOfRangeException(nameof(bitPos));
+        if ((uint)byteOffset >= (uint)_data.Length) throw new ArgumentOutOfRangeException(nameof(byteOffset));
+
+        // Find the 4-byte aligned word containing this byte and compute the bit's
+        // position inside that word (little-endian byte order).
+        int wordOffset = byteOffset & ~3;
+        int bitInWord = ((byteOffset - wordOffset) * 8) + bitPos;
+        uint mask = 1u << bitInWord;
+
+        // If the tag's buffer is too short to hold the aligned word, fall back to
+        // a plain (non-atomic) RMW.  Tags this small can't have BOOL packing
+        // ambiguity anyway.
+        if (wordOffset + 4 > _data.Length)
+        {
+            byte host = _data[byteOffset];
+            byte b = (byte)(1 << bitPos);
+            _data[byteOffset] = value ? (byte)(host | b) : (byte)(host & ~b);
+        }
+        else
+        {
+            ref uint word = ref Unsafe.As<byte, uint>(ref _data[wordOffset]);
+            if (value) Interlocked.Or(ref word, mask);
+            else Interlocked.And(ref word, ~mask);
+        }
+
+        ValueChanged?.Invoke(this, new TagChangeInfo(byteOffset, 1));
     }
 
     public override string ToString() => $"{Name} ({ElementCount}x{ElementSize}B, type=0x{TagType:X4})";

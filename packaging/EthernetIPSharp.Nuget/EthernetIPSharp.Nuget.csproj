@@ -89,10 +89,13 @@
     <ItemGroup>
       <_LibDll Include="%(_LibProject.RootDir)%(_LibProject.Directory)bin\$(Configuration)\$(TargetFramework)\%(_LibProject.Filename).dll" />
       <_LibPdb Include="%(_LibProject.RootDir)%(_LibProject.Directory)bin\$(Configuration)\$(TargetFramework)\%(_LibProject.Filename).pdb" />
+      <!-- IntelliSense XML — only present when the library sets GenerateDocumentationFile. -->
+      <_LibXml Include="%(_LibProject.RootDir)%(_LibProject.Directory)bin\$(Configuration)\$(TargetFramework)\%(_LibProject.Filename).xml" Condition="Exists('%(_LibProject.RootDir)%(_LibProject.Directory)bin\$(Configuration)\$(TargetFramework)\%(_LibProject.Filename).xml')" />
     </ItemGroup>
     <ItemGroup>
       <TfmSpecificPackageFile Include="@(_LibDll)" PackagePath="lib\$(TargetFramework)\%(Filename)%(Extension)" />
       <TfmSpecificPackageFile Include="@(_LibPdb)" PackagePath="lib\$(TargetFramework)\%(Filename)%(Extension)" />
+      <TfmSpecificPackageFile Include="@(_LibXml)" PackagePath="lib\$(TargetFramework)\%(Filename)%(Extension)" />
     </ItemGroup>
   </Target>
 

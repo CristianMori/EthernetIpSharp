@@ -5,12 +5,25 @@ namespace EthernetIPSharp.Logix;
 /// <summary>
 /// In-memory tag database for the Logix simulator.
 /// Stores tags indexed by name (case-insensitive) and by Symbol Object instance ID.
+///
+/// <para><b>Concurrency.</b>  All internal maps (<c>_byName</c>, <c>_byInstanceId</c>,
+/// <c>_templates</c>, <c>_programs</c>) are <see cref="System.Collections.Concurrent.ConcurrentDictionary{TKey,TValue}"/>
+/// so lookups are safe against concurrent registration. Tag data buffers themselves
+/// are NOT snapshotted — see the concurrency note on <see cref="Tag"/> for the
+/// tearing model.</para>
 /// </summary>
 public sealed class TagDatabase : ITagDatabase
 {
     private readonly ConcurrentDictionary<string, Tag> _byName = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<uint, Tag> _byInstanceId = new();
     private uint _nextInstanceId = 1;
+
+    // Program scopes live alongside controller-scope tags. Each program gets its own
+    // ProgramScope with its own name and instance-id space. The pseudo-instance ids
+    // used for the controller-scope Program:<name> stubs come from a distinct
+    // reserved range (0xF000..0xFFFF) so they never collide with real tag ids.
+    private readonly ConcurrentDictionary<string, ProgramScope> _programs = new(StringComparer.OrdinalIgnoreCase);
+    private uint _nextProgramPseudoId = 0xF000;
 
     /// <summary>Fires when any tag's data changes (from any source).</summary>
     public event Action<Tag, TagChangeInfo>? AnyTagChanged;
@@ -31,13 +44,29 @@ public sealed class TagDatabase : ITagDatabase
         int arrayDims = elementCount > 1 ? 1 : 0;
         ushort symbolType = LogixDataTypes.MakeAtomicSymbolType(tagType, arrayDims);
 
+        // BOOL arrays are DWORD-packed in Logix (32 bits per DWORD), so the storage
+        // size is ceil(bitCount / 32) * 4 rather than one byte per element.  A
+        // BOOL scalar (elementCount == 1) uses the normal 1-byte layout.
+        int? dataSize = null;
+        if (tagType == LogixDataTypes.BOOL && elementCount > 1)
+        {
+            if (elementCount % 32 != 0)
+                throw new ArgumentException(
+                    $"BOOL array element count must be a multiple of 32 (got {elementCount})",
+                    nameof(elementCount));
+            dataSize = elementCount / 8;
+        }
+
+        uint[] dims = elementCount > 1 ? new uint[] { (uint)elementCount } : Array.Empty<uint>();
+
         var tag = new Tag(
             instanceId: Interlocked.Increment(ref _nextInstanceId),
             name: name,
             symbolType: symbolType,
             tagType: tagType,
             elementSize: elementSize,
-            elementCount: elementCount);
+            dims: dims,
+            dataSize: dataSize);
 
         RegisterTag(tag);
         return tag;
@@ -55,24 +84,116 @@ public sealed class TagDatabase : ITagDatabase
             symbolType: symbolType,
             tagType: template.StructureHandle,
             elementSize: (int)template.StructureSize,
-            elementCount: elementCount);
+            elementCount: elementCount)
+        { Template = template };
 
+        RegisterTag(tag);
+        return tag;
+    }
+
+    /// <summary>Add an atomic tag with an explicit multi-dimensional shape (up to 3 dims).</summary>
+    public Tag AddTag(string name, ushort tagType, uint[] dims)
+    {
+        if (dims.Length is < 1 or > 3)
+            throw new ArgumentException("dims.Length must be 1, 2, or 3", nameof(dims));
+        int elementSize = LogixDataTypes.GetElementSize(tagType);
+        if (elementSize < 0)
+            throw new ArgumentException($"Unknown tag type 0x{tagType:X4}", nameof(tagType));
+        ushort symbolType = LogixDataTypes.MakeAtomicSymbolType(tagType, dims.Length);
+        var tag = new Tag(
+            instanceId: Interlocked.Increment(ref _nextInstanceId),
+            name: name,
+            symbolType: symbolType,
+            tagType: tagType,
+            elementSize: elementSize,
+            dims: dims);
+        RegisterTag(tag);
+        return tag;
+    }
+
+    /// <summary>Add a structured tag with an explicit multi-dimensional shape (up to 3 dims).</summary>
+    public Tag AddTag(string name, TemplateDefinition template, uint[] dims)
+    {
+        if (dims.Length is < 1 or > 3)
+            throw new ArgumentException("dims.Length must be 1, 2, or 3", nameof(dims));
+        ushort symbolType = LogixDataTypes.MakeStructSymbolType(template.InstanceId, dims.Length);
+        var tag = new Tag(
+            instanceId: Interlocked.Increment(ref _nextInstanceId),
+            name: name,
+            symbolType: symbolType,
+            tagType: template.StructureHandle,
+            elementSize: (int)template.StructureSize,
+            dims: dims)
+        { Template = template };
         RegisterTag(tag);
         return tag;
     }
 
     private void RegisterTag(Tag tag)
     {
-        if (!_byName.TryAdd(tag.Name, tag))
-            throw new InvalidOperationException($"Tag '{tag.Name}' already exists");
+        // Order matters. Publish to the instance-id map and fire TagAdded (which
+        // creates the CIP Symbol Object instance in LogixDispatcher.OnTagAdded)
+        // BEFORE the tag becomes discoverable by name. A concurrent CIP request
+        // that resolves the tag via the class-based path (Class=0x6B, Instance=N)
+        // otherwise sees a name-resolvable tag whose CIP instance doesn't exist
+        // yet, returning 0x16 ObjectDoesNotExist instead of the value.
+        //
+        // Name-collision detection is deferred to the last step; rollback removes
+        // the instance-id entry and unsubscribes if that final publish fails.
         _byInstanceId[tag.InstanceId] = tag;
-
         tag.ValueChanged += OnTagValueChanged;
         TagAdded?.Invoke(tag);
+
+        if (!_byName.TryAdd(tag.Name, tag))
+        {
+            _byInstanceId.TryRemove(tag.InstanceId, out _);
+            tag.ValueChanged -= OnTagValueChanged;
+            throw new InvalidOperationException($"Tag '{tag.Name}' already exists");
+        }
+    }
+
+    /// <summary>
+    /// When true, per-write events (<see cref="Tag.ValueChanged"/> forwarded to
+    /// <see cref="AnyTagChanged"/>) are suppressed globally.  Cheaper than
+    /// unsubscribing per tag when the transpiler-generated scan simply doesn't
+    /// want any subscriber to see per-write callbacks.  Dirty tracking (see
+    /// <see cref="EnableDirtyTracking"/>) is also skipped while suppressed.
+    /// </summary>
+    public bool SuppressEvents { get; set; }
+
+    private ConcurrentDictionary<uint, byte>? _dirtyTags;
+
+    /// <summary>
+    /// Enable per-tag dirty tracking.  Any tag whose <see cref="Tag.ValueChanged"/>
+    /// fires while this is on is recorded once (its instance id) until
+    /// <see cref="DrainDirty"/> is called, which returns and clears the set.
+    /// Off by default; the transpiler-generated scan enables it only when an
+    /// observer actually needs periodic notifications (e.g. a display cache
+    /// refresh at scan boundaries).
+    /// </summary>
+    public void EnableDirtyTracking() => _dirtyTags ??= new ConcurrentDictionary<uint, byte>();
+
+    /// <summary>Turn dirty tracking off and discard the accumulated set.</summary>
+    public void DisableDirtyTracking() => _dirtyTags = null;
+
+    /// <summary>
+    /// Snapshot the accumulated dirty tag ids and clear the set.  Empty when
+    /// dirty tracking is off.
+    /// </summary>
+    public IReadOnlyCollection<uint> DrainDirty()
+    {
+        var d = _dirtyTags;
+        if (d == null || d.IsEmpty) return Array.Empty<uint>();
+        var snapshot = new List<uint>(d.Count);
+        foreach (var kv in d) snapshot.Add(kv.Key);
+        foreach (var id in snapshot) d.TryRemove(id, out _);
+        return snapshot;
     }
 
     private void OnTagValueChanged(Tag tag, TagChangeInfo info)
     {
+        if (SuppressEvents) return;
+        _dirtyTags?.TryAdd(tag.InstanceId, 0);
         AnyTagChanged?.Invoke(tag, info);
     }
 
@@ -94,6 +215,27 @@ public sealed class TagDatabase : ITagDatabase
 
     /// <summary>Number of tags.</summary>
     public int Count => _byName.Count;
+
+    // --- Program scope management ---
+
+    /// <summary>
+    /// Register (or return an existing) named program scope.  Program-scoped tags
+    /// are added through the returned <see cref="ProgramScope"/> and addressed by
+    /// clients as <c>Program:&lt;name&gt;.&lt;tag&gt;</c>.
+    /// </summary>
+    public ProgramScope RegisterProgram(string name) =>
+        _programs.GetOrAdd(name, static (n, self) =>
+        {
+            uint pseudoId = (uint)Interlocked.Increment(ref self._nextProgramPseudoId) - 1;
+            return new ProgramScope(n, pseudoId, self);
+        }, this);
+
+    /// <summary>Look up a program scope by name (case-insensitive).  Returns null if unknown.</summary>
+    public ProgramScope? FindProgram(string name) =>
+        _programs.TryGetValue(name, out var p) ? p : null;
+
+    /// <summary>All registered program scopes.</summary>
+    public IEnumerable<ProgramScope> AllPrograms => _programs.Values;
 
     // --- Template management ---
 
@@ -156,16 +298,36 @@ public sealed class TagDatabase : ITagDatabase
                 boolBitPos = 0;
                 boolHostOffset = -1;
 
-                int elemSize = LogixDataTypes.GetElementSize(m.DataType);
-                if (elemSize <= 0) elemSize = 4; // Default for unknown/struct types
+                int elemSize;
+                int alignment;
+                ushort resolvedDataType = m.DataType;
 
-                // Alignment based on data type
-                int alignment = GetAlignment(m.DataType, elemSize);
+                if (LogixDataTypes.IsStruct(m.DataType))
+                {
+                    // Nested struct member — resolve to a registered template so the
+                    // element size is the nested StructureSize, not the 4-byte fallback.
+                    // Preserve the 0x8000 bit in the stored DataType so TemplateObject
+                    // emits it and clients recurse via ReadTemplate.
+                    ushort nestedId = LogixDataTypes.GetTemplateId(m.DataType);
+                    var nested = FindTemplate(nestedId)
+                        ?? throw new InvalidOperationException(
+                            $"Template member '{m.Name}' references unregistered nested template 0x{nestedId:X4}. Register the nested template first.");
+                    elemSize = (int)nested.StructureSize;
+                    alignment = 4; // Structures always align on 4-byte boundaries.
+                    resolvedDataType = (ushort)(0x8000 | nestedId);
+                }
+                else
+                {
+                    elemSize = LogixDataTypes.GetElementSize(m.DataType);
+                    if (elemSize <= 0) elemSize = 4; // Default for unknown types.
+                    alignment = GetAlignment(m.DataType, elemSize);
+                }
+
                 offset = Align(offset, alignment);
 
                 int memberSize = m.ArraySize > 0 ? elemSize * m.ArraySize : elemSize;
 
-                resolvedMembers.Add(new TemplateMemberInfo(m.Name, m.DataType, offset, m.ArraySize, elemSize));
+                resolvedMembers.Add(new TemplateMemberInfo(m.Name, resolvedDataType, offset, m.ArraySize, elemSize));
                 offset += memberSize;
             }
         }
@@ -184,6 +346,42 @@ public sealed class TagDatabase : ITagDatabase
             members: resolvedMembers.ToArray());
 
         _templates[instanceId] = template;
+        TemplateAdded?.Invoke(template);
+        return template;
+    }
+
+    /// <summary>
+    /// Register a pre-resolved template with explicit offsets, sizes, and (for nested
+    /// struct members) the 0x8000 bit already set on their DataType.  Used by the
+    /// PlcTranspiler to import the exact layout Studio 5000 exports without the
+    /// library recomputing offsets.  Also fully covers add-on instruction backing
+    /// structures (BOOL parameters packed into hidden DINT hosts, SINT reordering)
+    /// since the caller supplies the layout.
+    ///
+    /// <paramref name="template"/> must have a non-zero <see cref="TemplateDefinition.InstanceId"/>
+    /// that is not already in use.  Nested-struct members (DataType with 0x8000
+    /// set) are not resolved by this method — the caller must register children
+    /// before parents so <see cref="FindTemplate"/> can find them at request time.
+    /// </summary>
+    public TemplateDefinition AddTemplate(TemplateDefinition template)
+    {
+        if (template.InstanceId == 0)
+            throw new ArgumentException(
+                "TemplateDefinition.InstanceId must be non-zero. Use AddTemplate(name, members[]) for auto-assignment.",
+                nameof(template));
+        if (!_templates.TryAdd(template.InstanceId, template))
+            throw new InvalidOperationException(
+                $"Template with InstanceId 0x{template.InstanceId:X4} already exists");
+
+        // Bump the auto-assign counter past this id so a later
+        // AddTemplate(name, members[]) call doesn't collide.
+        int cur;
+        do
+        {
+            cur = _nextTemplateId;
+            if (cur >= template.InstanceId) break;
+        } while (Interlocked.CompareExchange(ref _nextTemplateId, template.InstanceId, cur) != cur);
+
         TemplateAdded?.Invoke(template);
         return template;
     }
@@ -208,9 +406,16 @@ public sealed class TagDatabase : ITagDatabase
             0xC3 => 2,  // INT
             0xC4 => 4,  // DINT
             0xC5 => 8,  // LINT — 8-byte aligned
+            0xC6 => 1,  // USINT
+            0xC7 => 2,  // UINT
+            0xC8 => 4,  // UDINT
+            0xC9 => 8,  // ULINT — 8-byte aligned
             0xCA => 4,  // REAL
             0xCB => 8,  // LREAL — 8-byte aligned
+            0xD1 => 1,  // BYTE
+            0xD2 => 2,  // WORD
             0xD3 => 4,  // DWORD
+            0xD4 => 8,  // LWORD — 8-byte aligned
             _ => Math.Min(elementSize, 4), // Unknown: align to element size, max 4
         };
     }

@@ -27,11 +27,28 @@ public interface ITagDatabase
     /// <summary>Define a structure template (UDT) with the given members.</summary>
     TemplateDefinition AddTemplate(string name, params TemplateMember[] members);
 
+    /// <summary>
+    /// Register a pre-resolved template (explicit offsets, sizes, and nested-struct
+    /// DataType bits). Used by callers that already know the exact byte layout —
+    /// e.g. the PlcTranspiler importing an L5X export, or callers building add-on
+    /// instruction backing structures.
+    /// </summary>
+    TemplateDefinition AddTemplate(TemplateDefinition template);
+
     /// <summary>Find a template by its instance ID.</summary>
     TemplateDefinition? FindTemplate(ushort instanceId);
 
     /// <summary>All template definitions.</summary>
     IEnumerable<TemplateDefinition> AllTemplates { get; }
+
+    /// <summary>Register (or return existing) a named program scope for program-local tags.</summary>
+    ProgramScope RegisterProgram(string name);
+
+    /// <summary>Look up a program scope by name (case-insensitive), or null if unknown.</summary>
+    ProgramScope? FindProgram(string name);
+
+    /// <summary>All registered program scopes.</summary>
+    IEnumerable<ProgramScope> AllPrograms { get; }
 
     /// <summary>Fires when any tag's data changes (from any source — CIP write or application code).</summary>
     event Action<Tag, TagChangeInfo>? AnyTagChanged;

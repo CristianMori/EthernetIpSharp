@@ -110,6 +110,66 @@ public class LogixDispatcher : CipDispatcher
     protected override CipServiceResponse OnUnhandled(byte serviceCode, CipPath path,
         ReadOnlyMemory<byte> data, byte defaultStatus = CipStatus.PathDestinationUnknown)
     {
+        // Prefer the ordered Segments list when it carries a symbolic root plus
+        // post-root drilling. Otherwise fall back to the flat SymbolicName lookup
+        // for back-compat with callers that build CipPath via an object initializer
+        // without segments. Paths with only logical segments (Class/Instance) fall
+        // through to base.OnUnhandled so class-instance dispatch runs.
+        var segs = path.Segments;
+        int firstSymIdx = FindFirstSymbolic(segs);
+        if (firstSymIdx >= 0)
+        {
+            var firstSymName = ((SymbolicPathSegment)segs[firstSymIdx]).Name;
+
+            // Program-scope prefix: "Program:MainProgram" selects the program's own
+            // tag table; the next symbolic segment names the root tag inside it.
+            if (firstSymName.StartsWith("Program:", StringComparison.OrdinalIgnoreCase))
+            {
+                var programName = firstSymName.Substring("Program:".Length);
+                var program = Tags.FindProgram(programName);
+                if (program == null)
+                    return CipServiceResponse.Error(serviceCode, CipStatus.Error(0x05));
+
+                int rootSymIdx = FindNextSymbolic(segs, firstSymIdx + 1);
+                if (rootSymIdx < 0)
+                    return CipServiceResponse.Error(serviceCode, CipStatus.Error(0x05));
+
+                var rootName = ((SymbolicPathSegment)segs[rootSymIdx]).Name;
+                var programTag = program.FindByName(rootName);
+                if (programTag == null)
+                    return CipServiceResponse.Error(serviceCode, CipStatus.Error(0x05));
+
+                var postProgram = CollectPostRoot(segs, rootSymIdx);
+                if (postProgram.Count == 0)
+                    return DispatchTagService(programTag, serviceCode, data, path);
+
+                if (!TagPathWalker.TryWalk(programTag, postProgram, Tags.FindTemplate, out var pwalked, out _))
+                    return CipServiceResponse.Error(serviceCode, CipStatus.Error(0x05));
+                return DispatchTagServiceWalked(programTag, serviceCode, data, pwalked);
+            }
+
+            var rootName2 = firstSymName;
+            if (!_symbolCache.TryGetValue(rootName2, out var tag))
+            {
+                tag = Tags.FindByName(rootName2);
+                if (tag == null)
+                    return CipServiceResponse.Error(serviceCode, CipStatus.Error(0x05));
+                _symbolCache[rootName2] = tag;
+            }
+
+            // Collect post-root segments (member drilling / element indexing).
+            // Logical segments interleaved with symbolics are ignored — the class
+            // dispatcher already picked those up.
+            var postRoot = CollectPostRoot(segs, firstSymIdx);
+            if (postRoot.Count == 0)
+                return DispatchTagService(tag, serviceCode, data, path);
+
+            if (!TagPathWalker.TryWalk(tag, postRoot, Tags.FindTemplate, out var walked, out _))
+                return CipServiceResponse.Error(serviceCode, CipStatus.Error(0x05));
+
+            return DispatchTagServiceWalked(tag, serviceCode, data, walked);
+        }
+
         if (path.SymbolicName != null)
         {
             // Fast path: check cache first
@@ -128,6 +188,31 @@ public class LogixDispatcher : CipDispatcher
         return base.OnUnhandled(serviceCode, path, data, defaultStatus);
     }
 
+    private static int FindFirstSymbolic(IReadOnlyList<CipPathSegment> segs)
+    {
+        for (int i = 0; i < segs.Count; i++)
+            if (segs[i] is SymbolicPathSegment) return i;
+        return -1;
+    }
+
+    private static int FindNextSymbolic(IReadOnlyList<CipPathSegment> segs, int from)
+    {
+        for (int i = from; i < segs.Count; i++)
+            if (segs[i] is SymbolicPathSegment) return i;
+        return -1;
+    }
+
+    private static List<CipPathSegment> CollectPostRoot(IReadOnlyList<CipPathSegment> segs, int firstSymIdx)
+    {
+        var post = new List<CipPathSegment>(Math.Max(0, segs.Count - firstSymIdx - 1));
+        for (int i = firstSymIdx + 1; i < segs.Count; i++)
+        {
+            if (segs[i] is LogicalPathSegment) continue;
+            post.Add(segs[i]);
+        }
+        return post;
+    }
+
     internal static CipServiceResponse DispatchTagService(Tag tag, byte serviceCode,
         ReadOnlyMemory<byte> data, CipPath path)
     {
@@ -139,6 +224,20 @@ public class LogixDispatcher : CipDispatcher
             TagServices.ReadTagFragmented => TagServices.HandleReadTagFragmented(tag, serviceCode, data),
             TagServices.WriteTagFragmented => TagServices.HandleWriteTagFragmented(tag, serviceCode, data),
             TagServices.ReadModifyWrite => TagServices.HandleReadModifyWrite(tag, serviceCode, data),
+            _ => CipServiceResponse.Error(serviceCode, CipStatus.Error(CipStatus.ServiceNotSupported)),
+        };
+    }
+
+    internal static CipServiceResponse DispatchTagServiceWalked(Tag tag, byte serviceCode,
+        ReadOnlyMemory<byte> data, TagPathWalker.WalkResult walked)
+    {
+        return serviceCode switch
+        {
+            TagServices.ReadTag => TagServices.HandleReadTagAt(tag, serviceCode, data, walked),
+            TagServices.WriteTag => TagServices.HandleWriteTagAt(tag, serviceCode, data, walked),
+            TagServices.ReadTagFragmented => TagServices.HandleReadTagFragmentedAt(tag, serviceCode, data, walked),
+            TagServices.WriteTagFragmented => TagServices.HandleWriteTagFragmentedAt(tag, serviceCode, data, walked),
+            TagServices.ReadModifyWrite => TagServices.HandleReadModifyWriteAt(tag, serviceCode, data, walked),
             _ => CipServiceResponse.Error(serviceCode, CipStatus.Error(CipStatus.ServiceNotSupported)),
         };
     }

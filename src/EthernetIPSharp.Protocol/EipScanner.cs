@@ -55,6 +55,39 @@ public sealed class EipScanner : IAsyncDisposable
     }
 
     /// <summary>
+    /// Send an arbitrary CIP service to a class/instance/attribute (idiomatic
+    /// shape).  Wraps in <c>Unconnected_Send</c> through the Connection Manager
+    /// when <paramref name="routePath"/> is non-empty (backplane routing to e.g.
+    /// a CPU in another slot); otherwise sends as bare MR.  Use this instead of
+    /// <see cref="SendExplicitAsync"/> unless the caller has already encoded the
+    /// EPATH by hand.
+    /// </summary>
+    public Task<CipServiceResponse> SendGenericAsync(
+        byte serviceCode, uint classId, uint instanceId, ushort? attributeId = null,
+        ReadOnlyMemory<byte> data = default, byte[]? routePath = null,
+        CancellationToken ct = default)
+    {
+        var pathBytes = PathBuilder.BuildPath(classId, instanceId, attributeId);
+        if (routePath is { Length: > 0 })
+        {
+            var innerMr = UnconnectedSendBuilder.BuildInnerMr(serviceCode, pathBytes, data.Span);
+            var outerMr = UnconnectedSendBuilder.Wrap(innerMr, routePath);
+            // Re-parse the outer MR back into (service, path, data) to feed
+            // SendExplicitAsync's signature. The outer MR is: service(1) +
+            // path_size_words(1) + path(path_size*2) + rest.
+            byte outerPathSizeWords = outerMr[1];
+            int outerPathLen = outerPathSizeWords * 2;
+            var outerPath = new byte[outerPathLen];
+            outerMr.AsSpan(2, outerPathLen).CopyTo(outerPath);
+            var outerData = new byte[outerMr.Length - 2 - outerPathLen];
+            outerMr.AsSpan(2 + outerPathLen).CopyTo(outerData);
+            return SendExplicitAsync(outerMr[0], outerPath, outerData, ct);
+        }
+        // No routing needed — bare MR.
+        return SendExplicitAsync(serviceCode, pathBytes, data.ToArray(), ct);
+    }
+
+    /// <summary>
     /// Send an explicit CIP message (UCMM via SendRRData).
     /// This is the generic transport — any service code, any path, any data.
     /// </summary>

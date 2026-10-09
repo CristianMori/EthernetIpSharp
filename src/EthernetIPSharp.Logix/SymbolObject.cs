@@ -141,15 +141,32 @@ public sealed class SymbolObject
         // Starting instance from the request path
         uint startInstance = request.Path.InstanceId ?? 0;
 
-        // Get all tags sorted by instance ID, starting after startInstance
+        // Get all tags sorted by instance ID, starting after startInstance.  At
+        // controller scope this includes a pseudo-tag per registered program,
+        // named "Program:<name>", so browsing clients discover which programs
+        // exist and can then send follow-up requests scoped to that program.
+        // Program pseudo-instance ids live in the reserved 0xF000-0xFFFF range.
         var tags = _tags.AllTags
+            .Concat(_tags.AllPrograms.Select(p => new Tag(
+                instanceId: p.PseudoInstanceId,
+                name: $"Program:{p.Name}",
+                // Symbol type: system-tag bit (0x1000) + Logix Program class code (0x68).
+                // This mirrors the pattern a 1756 uses to mark program pseudo-tags in
+                // controller-scope enumerations; refine against a captured trace if a
+                // client parses this differently.
+                symbolType: 0x1068,
+                tagType: 0x1068,
+                elementSize: 0)))
             .Where(t => t.InstanceId > startInstance)
             .OrderBy(t => t.InstanceId)
             .ToList();
 
-        // Ensure all tags have CIP instances
+        // Ensure all real tags have CIP instances (skip synthetic program pseudo-tags).
         foreach (var tag in tags)
-            EnsureInstance(tag);
+        {
+            if (tag.InstanceId < 0xF000)
+                EnsureInstance(tag);
+        }
 
         // Pack response
         var buffer = new byte[4096];
@@ -208,11 +225,13 @@ public sealed class SymbolObject
                         BinaryPrimitives.WriteUInt32LittleEndian(buffer.AsSpan(offset), 0u);
                         offset += 4;
                         break;
-                    case 8:    // Array Dimensions (3 x UDINT)
-                        uint d1 = tag.ElementCount > 1 ? (uint)tag.ElementCount : 0u;
+                    case 8:    // Array Dimensions (3 x UDINT). Missing dims report 0.
+                        uint d1 = tag.Dims.Count > 0 ? tag.Dims[0] : 0u;
+                        uint d2 = tag.Dims.Count > 1 ? tag.Dims[1] : 0u;
+                        uint d3 = tag.Dims.Count > 2 ? tag.Dims[2] : 0u;
                         BinaryPrimitives.WriteUInt32LittleEndian(buffer.AsSpan(offset),     d1);
-                        BinaryPrimitives.WriteUInt32LittleEndian(buffer.AsSpan(offset + 4), 0u);
-                        BinaryPrimitives.WriteUInt32LittleEndian(buffer.AsSpan(offset + 8), 0u);
+                        BinaryPrimitives.WriteUInt32LittleEndian(buffer.AsSpan(offset + 4), d2);
+                        BinaryPrimitives.WriteUInt32LittleEndian(buffer.AsSpan(offset + 8), d3);
                         offset += 12;
                         break;
                     case 10:   // External Access (USINT). 3 = Read/Write.
