@@ -29,12 +29,26 @@ public static class LogixDataTypes
     public const ushort DINT = 0x00C4;
     /// <summary>LINT — signed 64-bit integer, 8 bytes.</summary>
     public const ushort LINT = 0x00C5;
+    /// <summary>USINT — unsigned 8-bit integer, 1 byte (CIP Vol 1 §C-6.1).</summary>
+    public const ushort USINT = 0x00C6;
+    /// <summary>UINT — unsigned 16-bit integer, 2 bytes (CIP Vol 1 §C-6.1).</summary>
+    public const ushort UINT = 0x00C7;
+    /// <summary>UDINT — unsigned 32-bit integer, 4 bytes (CIP Vol 1 §C-6.1).</summary>
+    public const ushort UDINT = 0x00C8;
+    /// <summary>ULINT — unsigned 64-bit integer, 8 bytes (CIP Vol 1 §C-6.1).</summary>
+    public const ushort ULINT = 0x00C9;
     /// <summary>REAL — 32-bit IEEE float, 4 bytes.</summary>
     public const ushort REAL = 0x00CA;
     /// <summary>LREAL — 64-bit IEEE double, 8 bytes.</summary>
     public const ushort LREAL = 0x00CB;
+    /// <summary>BYTE — 8-bit bit string, 1 byte (CIP Vol 1 §C-6.1).</summary>
+    public const ushort BYTE = 0x00D1;
+    /// <summary>WORD — 16-bit bit string, 2 bytes (CIP Vol 1 §C-6.1).</summary>
+    public const ushort WORD = 0x00D2;
     /// <summary>DWORD — 32-bit bit string, 4 bytes.</summary>
     public const ushort DWORD = 0x00D3;
+    /// <summary>LWORD — 64-bit bit string, 8 bytes (CIP Vol 1 §C-6.1).</summary>
+    public const ushort LWORD = 0x00D4;
 
     // --- Logix STRING structure layout ---
 
@@ -53,7 +67,14 @@ public static class LogixDataTypes
     /// <summary>Maximum character count for the predefined Logix STRING type.</summary>
     public const int StringMaxLength = 82;
 
-    /// <summary>Returns the byte size of an atomic tag type, or -1 if unknown/structure.</summary>
+    /// <summary>
+    /// Returns the byte size of an atomic tag type, or -1 if unknown/structure.
+    /// Covers the integer family (signed and unsigned), the IEEE float family,
+    /// and the bit-string family (BYTE/WORD/DWORD/LWORD).  Variable-length
+    /// character and time/date types from CIP Vol 1 §C-6.1 are not elementary
+    /// Logix types and are intentionally rejected here — tags using them must
+    /// be registered as structures via a template.
+    /// </summary>
     public static int GetElementSize(ushort tagType)
     {
         // Mask off BOOL bit position field (upper nibble of low byte)
@@ -65,9 +86,16 @@ public static class LogixDataTypes
             0xC3 => 2,  // INT
             0xC4 => 4,  // DINT
             0xC5 => 8,  // LINT
+            0xC6 => 1,  // USINT
+            0xC7 => 2,  // UINT
+            0xC8 => 4,  // UDINT
+            0xC9 => 8,  // ULINT
             0xCA => 4,  // REAL
             0xCB => 8,  // LREAL
+            0xD1 => 1,  // BYTE
+            0xD2 => 2,  // WORD
             0xD3 => 4,  // DWORD
+            0xD4 => 8,  // LWORD
             _ => -1,
         };
     }

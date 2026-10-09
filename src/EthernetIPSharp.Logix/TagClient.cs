@@ -1228,12 +1228,16 @@ public sealed class TagClient : IAsyncDisposable
     /// <summary>Map a .NET type to the corresponding Logix tag type code.</summary>
     private static ushort GuessTagType<T>() where T : unmanaged
     {
-        if (typeof(T) == typeof(bool)) return LogixDataTypes.BOOL;
-        if (typeof(T) == typeof(int) || typeof(T) == typeof(uint)) return LogixDataTypes.DINT;
-        if (typeof(T) == typeof(float)) return LogixDataTypes.REAL;
-        if (typeof(T) == typeof(short) || typeof(T) == typeof(ushort)) return LogixDataTypes.INT;
-        if (typeof(T) == typeof(sbyte) || typeof(T) == typeof(byte)) return LogixDataTypes.SINT;
-        if (typeof(T) == typeof(long) || typeof(T) == typeof(ulong)) return LogixDataTypes.LINT;
+        if (typeof(T) == typeof(bool))   return LogixDataTypes.BOOL;
+        if (typeof(T) == typeof(sbyte))  return LogixDataTypes.SINT;
+        if (typeof(T) == typeof(byte))   return LogixDataTypes.USINT;
+        if (typeof(T) == typeof(short))  return LogixDataTypes.INT;
+        if (typeof(T) == typeof(ushort)) return LogixDataTypes.UINT;
+        if (typeof(T) == typeof(int))    return LogixDataTypes.DINT;
+        if (typeof(T) == typeof(uint))   return LogixDataTypes.UDINT;
+        if (typeof(T) == typeof(long))   return LogixDataTypes.LINT;
+        if (typeof(T) == typeof(ulong))  return LogixDataTypes.ULINT;
+        if (typeof(T) == typeof(float))  return LogixDataTypes.REAL;
         if (typeof(T) == typeof(double)) return LogixDataTypes.LREAL;
         throw new NotSupportedException($"Cannot map {typeof(T).Name} to a Logix tag type");
     }

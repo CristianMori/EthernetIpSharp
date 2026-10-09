@@ -406,9 +406,16 @@ public sealed class TagDatabase : ITagDatabase
             0xC3 => 2,  // INT
             0xC4 => 4,  // DINT
             0xC5 => 8,  // LINT — 8-byte aligned
+            0xC6 => 1,  // USINT
+            0xC7 => 2,  // UINT
+            0xC8 => 4,  // UDINT
+            0xC9 => 8,  // ULINT — 8-byte aligned
             0xCA => 4,  // REAL
             0xCB => 8,  // LREAL — 8-byte aligned
+            0xD1 => 1,  // BYTE
+            0xD2 => 2,  // WORD
             0xD3 => 4,  // DWORD
+            0xD4 => 8,  // LWORD — 8-byte aligned
             _ => Math.Min(elementSize, 4), // Unknown: align to element size, max 4
         };
     }
