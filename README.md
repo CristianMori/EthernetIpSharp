@@ -61,6 +61,7 @@ The library is layered into independent projects so you can use only the parts y
 - `EipScanner.SendGenericAsync(service, class, instance, attribute?, data, route?)` — idiomatic CIP request wrapper with optional `Unconnected_Send` routing
 
 **Logix tag server (Studio-5000-compatible)**
+- Full CIP Vol 1 §C-6.1 elementary type family — BOOL, signed integers (SINT/INT/DINT/LINT), unsigned integers (USINT/UINT/UDINT/ULINT), floats (REAL/LREAL), and bit strings (BYTE/WORD/DWORD/LWORD)
 - Program-scoped tags — `Program:Cell.Timer1.PRE` resolves to the program's own tag table with per-program instance-id space
 - Nested UDT templates with pre-resolved layout registration (`AddTemplate(TemplateDefinition)`) — the transpiler escape hatch for L5X exports including AOI backing structures (32-per-DINT BOOL packing) and STRING
 - Member / element / BOOL-bit path walker — a CIP request for `Motor.Timer.PRE`, `Motor.DN`, or `Line[2].Speed` returns the right bytes with the right type code
