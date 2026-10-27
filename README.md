@@ -1,13 +1,46 @@
 # EthernetIPSharp
 
+[![NuGet](https://img.shields.io/nuget/v/EthernetIPSharp)](https://www.nuget.org/packages/EthernetIPSharp)
+[![Downloads](https://img.shields.io/nuget/dt/EthernetIPSharp)](https://www.nuget.org/packages/EthernetIPSharp)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![.NET 8](https://img.shields.io/badge/.NET-8-512BD4)](https://dotnet.microsoft.com/)
+
+<!-- TODO: set the GitHub repository homepage to https://www.nuget.org/packages/EthernetIPSharp -->
+
 A complete EtherNet/IP and CIP Safety protocol stack written in C# (.NET 8). Acts as **adapter** (target / I/O slave), **scanner** (originator / I/O master), or **Logix-compatible tag server / client** — with or without CIP Safety. Tested against real Allen-Bradley ControlLogix and CompactLogix PLCs as well as 1734 distributed safety I/O modules.
 
 The library is layered into independent projects so you can use only the parts you need: bring in `EthernetIPSharp.Cip` if you just want a CIP message router, add `EthernetIPSharp.Device` for I/O assemblies, layer on `EthernetIPSharp.Safety` if you need a SIL-3-style safety connection, or use `EthernetIPSharp.Logix` for symbolic tag access against a real PLC.
+
+## Install
+
+```bash
+dotnet add package EthernetIPSharp
+```
+
+The [`EthernetIPSharp`](https://www.nuget.org/packages/EthernetIPSharp) package targets `net8.0` and ships `EthernetIPSharp.Cip`, `EthernetIPSharp.Protocol`, `EthernetIPSharp.Connections`, `EthernetIPSharp.Device`, `EthernetIPSharp.Safety`, and `EthernetIPSharp.Logix` in one package.
+
+## 30-second quickstart
+
+Connect to a Logix controller and read, then write, one atomic tag. `ReadAsync` sends **Read Tag** (`0x4C`); `WriteAsync` sends **Write Tag** (`0x4D`). `int` maps to a Logix DINT. With no route `path`, this is the CompactLogix or EN-hosted symbol-service case — a ControlLogix backplane route is in [Logix tag client](#logix-tag-client).
+
+```csharp
+using EthernetIPSharp.Logix;
+
+await using var client = new TagClient("192.168.1.96");
+await client.ConnectAsync();
+
+int rate = await client.ReadAsync<int>("rate");
+await client.WriteAsync("rate", 1500);
+```
+
+Adapter, scanner, CIP Safety, structures, and the tag server are in [Quick start](#quick-start).
 
 ---
 
 ## Table of contents
 
+- [Install](#install)
+- [30-second quickstart](#30-second-quickstart)
 - [Features](#features)
 - [Architecture](#architecture)
 - [Project layout](#project-layout)
@@ -24,6 +57,7 @@ The library is layered into independent projects so you can use only the parts y
 - [CIP services supported](#cip-services-supported)
 - [CIP Safety details](#cip-safety-details)
 - [Known limitations](#known-limitations)
+- [Related projects](#related-projects)
 - [License](#license)
 
 ---
@@ -564,6 +598,18 @@ Set `ETHERNETIPSHARP_LAG_CSV=1` before launching the adapter to write per-iterat
 - Originator-side connection bridging through multiple hops is not implemented.
 - Safety reset / safety configuration apply services are wired in but not extensively interop-tested.
 - Structure handles are `0x8000 | instance_id` for auto-registered UDTs; pre-resolved templates carry whatever handle the caller supplies. A Logix-style CRC over the template definition is available (`CipCrc16.Calc`) but not yet wired into `AddTemplate` — needs a live Studio 5000 capture to confirm the exact byte range hashed for UDTs with arrays / structs / BOOLs.
+
+---
+
+## Related projects
+
+Part of a family of open-source robotics / industrial-automation libraries by @CristianMori:
+
+- **EtherNet/IP + CIP Safety:** [Python](https://github.com/CristianMori/EthernetIpPython) · [C#](https://github.com/CristianMori/EthernetIpSharp) · [Rust](https://github.com/CristianMori/EthernetIpRust) · [C++](https://github.com/CristianMori/EthernetIpCpp)
+- **PLC tooling:** [MoriFixPlc](https://github.com/CristianMori/MoriFixPlc) (portable PLC HAL) · [EscaFlow](https://github.com/CristianMori/Mori.EscaFlow) (PLC transpiler)
+- **ROS in pure C#:** [Mori.RosSharp](https://github.com/CristianMori/Mori.RosSharp) (ROS 1) · [Mori.Ros2Sharp](https://github.com/CristianMori/Mori.Ros2Sharp) (ROS 2)
+- **Simulation & vision:** [GemelliStudio](https://github.com/CristianMori/GemelliStudio) · [LocateAnythingSharp](https://github.com/CristianMori/LocateAnythingSharp) · [Mori.SkyScope](https://github.com/CristianMori/Mori.SkyScope)
+- **AI agents:** [Deckhand](https://github.com/CristianMori/DeckHand)
 
 ---
 
