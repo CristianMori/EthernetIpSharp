@@ -5,6 +5,9 @@ obj/
 *.vs/
 .vs/
 *.DotSettings.user
-tools/
+tools/*
+!tools/bflat/
+tools/bflat/bflat*
+tools/bflat/*.zip
 settings.local.json
 artifacts/

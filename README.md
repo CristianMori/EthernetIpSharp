@@ -452,6 +452,26 @@ Requirements: .NET 8 SDK or newer.
 
 The test suite covers CIP path parsing, MR codec, encapsulation, scanner ↔ adapter loopback, tag read/write/browse, CRC check values, safety frame round-trips, and safety segment parsing.
 
+### Native AOT with bflat (optional)
+
+In addition to `dotnet build`, the stack compiles cleanly with
+[bflat](https://github.com/bflattened/bflat) — a native C# compiler that produces a
+single standalone binary with no managed runtime dependency. The library has zero
+`PackageReference`s and no late-bound reflection, so the whole closure is AOT-clean.
+
+```powershell
+# Windows (PowerShell) — ~2.2 MB native sample-tag.exe
+.\tools\bflat\build-sampletag.ps1
+```
+
+```bash
+# Linux / macOS / Git Bash
+./tools/bflat/build-sampletag.sh
+```
+
+See [`tools/bflat/README.md`](tools/bflat/README.md) for details and how to target
+the other samples.
+
 ---
 
 ## Library reference
