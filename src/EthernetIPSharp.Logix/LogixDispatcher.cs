@@ -216,7 +216,16 @@ public class LogixDispatcher : CipDispatcher
     internal static CipServiceResponse DispatchTagService(Tag tag, byte serviceCode,
         ReadOnlyMemory<byte> data, CipPath path)
     {
-        int elementOffset = (int)(path.ElementId ?? 0);
+        // ElementId is a uint on the wire. A direct (int) cast of a value above
+        // int.MaxValue wraps to a NEGATIVE offset — multiplied by ElementSize
+        // downstream it writes to arbitrary addresses in the tag buffer, or
+        // throws deep inside the tag service with a mangled error. Reject
+        // oversized indices here before anything downstream sees them.
+        uint elementIdRaw = path.ElementId ?? 0;
+        if (elementIdRaw > int.MaxValue)
+            return CipServiceResponse.Error(serviceCode, CipStatus.Error(CipStatus.PathDestinationUnknown));
+
+        int elementOffset = (int)elementIdRaw;
         return serviceCode switch
         {
             TagServices.ReadTag => TagServices.HandleReadTag(tag, serviceCode, data, elementOffset),
