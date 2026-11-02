@@ -202,7 +202,10 @@ public class AdvancedLogixTests : IAsyncLifetime
         }
 
         Assert.True(names.Count >= 4, $"Expected 4 names (template + 3 members), got {names.Count}: [{string.Join(", ", names)}]");
-        Assert.Equal("MachineData", names[0]); // Template name first
+        // Template name follows the Logix "<Name>;<crc>" convention — pycomm3
+        // and Studio 5000 split on ';' to pull the name out.  The zero CRC is a
+        // placeholder matching Studio exports that have no stored CRC.
+        Assert.Equal("MachineData;0", names[0]); // Template name first
         Assert.Equal("velocity", names[1]);
         Assert.Equal("position", names[2]);
         Assert.Equal("status", names[3]);

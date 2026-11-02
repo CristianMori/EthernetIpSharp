@@ -523,7 +523,9 @@ public sealed class TemplateDefinition
         // 21-byte header so a client's single-shot request matches the data we have
         // available and the handler returns SUCCESS on the first chunk rather than
         // looping on PARTIAL (0x06) forever.
-        int nameBytes = name.Length + 1; // null-terminated
+        // Name is emitted as "<Name>;0" (2 extra bytes) + NUL — see
+        // TemplateObject.BuildTemplateDefinitionData for the rationale.
+        int nameBytes = name.Length + 2 + 1; // "<Name>;0" + null terminator
         foreach (var m in members) nameBytes += m.Name.Length + 1;
         int memberDataBytes = members.Length * 8 + nameBytes;
         DefinitionSize = (uint)((21 + memberDataBytes + 3) / 4);

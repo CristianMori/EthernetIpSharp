@@ -169,9 +169,17 @@ public sealed class TemplateObject
     /// </summary>
     private static byte[] BuildTemplateDefinitionData(TemplateDefinition template)
     {
+        // Logix emits the template name as "<Name>;<crc>" (zero is a valid
+        // placeholder when there is no exported CRC).  pycomm3 and Studio 5000
+        // split the first null-terminated chunk on ';' and use only the left
+        // half as the template name — if we emit a bare "Name\0" the parser
+        // merges the template name with the first member name and the whole
+        // upload unwinds.
+        string nameOnWire = template.Name + ";0";
+
         // Calculate total size
         int memberInfoSize = template.MemberCount * 8; // 4 bytes type+info + 4 bytes offset per member
-        int nameBytes = template.Name.Length + 1; // null-terminated template name
+        int nameBytes = nameOnWire.Length + 1; // null-terminated template name (with ;0 suffix)
         foreach (var m in template.Members)
             nameBytes += m.Name.Length + 1;
 
@@ -204,9 +212,9 @@ public sealed class TemplateObject
             offset += 4;
         }
 
-        // Template name (null-terminated)
-        Encoding.ASCII.GetBytes(template.Name, data.AsSpan(offset));
-        offset += template.Name.Length;
+        // Template name (null-terminated, with ";0" suffix for Studio compatibility)
+        Encoding.ASCII.GetBytes(nameOnWire, data.AsSpan(offset));
+        offset += nameOnWire.Length;
         data[offset++] = 0;
 
         // Member names (null-terminated)
