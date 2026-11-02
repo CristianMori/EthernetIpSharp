@@ -19,7 +19,35 @@ public static class MultiServiceHandler
     /// <summary>Max encoded size of a single CIP service response (header + data).</summary>
     private const int MaxSingleResponseSize = 520;
 
+    /// <summary>
+    /// Maximum depth of nested Multiple Service Packet requests. Real clients
+    /// never nest MSP, so three levels of tolerance is already generous.
+    /// Without a cap, a crafted packet that lists itself as its own sub-request
+    /// recurses unboundedly and raises <see cref="StackOverflowException"/>,
+    /// which .NET cannot catch — it tears down the host process.
+    /// </summary>
+    private const int MaxNestingDepth = 3;
+
+    [ThreadStatic]
+    private static int _nestingDepth;
+
     public static CipServiceResponse Handle(ICipDispatch dispatch, CipServiceRequest request)
+    {
+        if (_nestingDepth >= MaxNestingDepth)
+            return CipServiceResponse.Error(request.ServiceCode, CipStatus.Error(CipStatus.ServiceNotSupported));
+
+        _nestingDepth++;
+        try
+        {
+            return HandleInner(dispatch, request);
+        }
+        finally
+        {
+            _nestingDepth--;
+        }
+    }
+
+    private static CipServiceResponse HandleInner(ICipDispatch dispatch, CipServiceRequest request)
     {
         if (request.Data.Length < 2)
             return CipServiceResponse.Error(request.ServiceCode, CipStatus.Error(0x13));
