@@ -177,15 +177,18 @@ public sealed class TemplateObject
         // upload unwinds.
         string nameOnWire = template.Name + ";0";
 
-        // Calculate total size
+        // Calculate total size.  Do NOT pad to a 4-byte boundary here — the
+        // Template Object attribute 4 Studio-boilerplate math is `(def_size * 4) - 21`,
+        // and pycomm3 expects the server to return exactly that many bytes in a
+        // single SUCCESS reply.  Any trailing padding bytes beyond that count
+        // make the handler respond PARTIAL (0x06) and pycomm3 then asks for the
+        // leftover with size=0, which spins forever.
         int memberInfoSize = template.MemberCount * 8; // 4 bytes type+info + 4 bytes offset per member
         int nameBytes = nameOnWire.Length + 1; // null-terminated template name (with ;0 suffix)
         foreach (var m in template.Members)
             nameBytes += m.Name.Length + 1;
 
         int totalSize = memberInfoSize + nameBytes;
-        // Pad to 4-byte boundary
-        totalSize = (totalSize + 3) / 4 * 4;
 
         var data = new byte[totalSize];
         int offset = 0;
