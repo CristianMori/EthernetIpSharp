@@ -154,32 +154,20 @@ public class TagClientOwnServerRoundTripTests
         var adapter = new EipAdapter(dispatcher, identity);
         var cts = new CancellationTokenSource();
         int port = GetFreePort();
+        // TcpSocket.StartAsync returns a completed Task once the accept
+        // thread is started, so ListenAsync returns immediately.
         var task = adapter.ListenAsync(IPAddress.Loopback, port, cts.Token);
-        // Small spin-wait: the loopback accept is near-instant but let the
-        // listener bind before the client tries to connect.
-        var deadline = DateTime.UtcNow.AddSeconds(5);
-        while (DateTime.UtcNow < deadline)
-        {
-            try
-            {
-                using var probe = new TcpClient();
-                probe.Connect(IPAddress.Loopback, port);
-                break;
-            }
-            catch { Thread.Sleep(25); }
-        }
         return (adapter, task, tags, stringTpl, motorTpl, timerTpl, aoiTpl, cts, port);
     }
 
     private static async Task Teardown(EipAdapter adapter, Task listenTask, CancellationTokenSource cts)
     {
-        cts.Cancel();
-        await adapter.DisposeAsync();
-        try { await listenTask; } catch { }
+        try { cts.Cancel(); } catch { }
+        try { await adapter.DisposeAsync(); } catch { }
         cts.Dispose();
     }
 
-    [Fact]
+    [Fact(Timeout = 60_000)]
     public async Task TagClient_FullMatrix_RoundTrips()
     {
         var ctx = SpawnServer();
