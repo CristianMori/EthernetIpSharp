@@ -381,16 +381,40 @@ public class EipAdapter : IAsyncDisposable
 /// </summary>
 internal sealed class TcpFrameAccumulator
 {
+    /// <summary>
+    /// Hard ceiling on the per-connection accumulator. Encapsulation frames
+    /// carry a uint16 length, so body is at most ~64 KiB plus the 24-byte
+    /// header. 128 KiB fits any legitimate frame and leaves room for one
+    /// trailing partial frame; past that the peer is either confused or
+    /// malicious and we refuse to grow further.
+    /// </summary>
+    private const int MaxBufferSize = 128 * 1024;
+
     private byte[] _buf = new byte[4096];
     private int _len;
 
     public void Append(ReadOnlySpan<byte> data)
     {
-        if (_len + data.Length > _buf.Length)
+        long needed = (long)_len + data.Length;
+        if (needed > MaxBufferSize)
         {
-            int newSize = _buf.Length;
-            while (newSize < _len + data.Length) newSize *= 2;
-            Array.Resize(ref _buf, newSize);
+            // Drop everything buffered so the connection can be torn down
+            // cleanly by the surrounding code; refusing without resetting
+            // would leave the stale bytes in place for the next receive.
+            _len = 0;
+            throw new InvalidDataException(
+                $"TCP frame accumulator would exceed {MaxBufferSize} bytes; dropping connection.");
+        }
+
+        if (needed > _buf.Length)
+        {
+            // Grow using long arithmetic so the comparison can never wrap
+            // past int.MaxValue — the earlier int-based doubling could spin
+            // forever once _buf.Length doubled past 2^30.
+            long newSize = _buf.Length;
+            while (newSize < needed) newSize *= 2;
+            if (newSize > MaxBufferSize) newSize = MaxBufferSize;
+            Array.Resize(ref _buf, (int)newSize);
         }
         data.CopyTo(_buf.AsSpan(_len));
         _len += data.Length;
