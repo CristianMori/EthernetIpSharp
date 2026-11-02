@@ -572,10 +572,18 @@ public static class TagServices
                 return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2107));
         }
 
-        int totalBytes = elementCount * walked.ElementSize;
+        // elementCount is UINT16 and walked.ElementSize is int — on a struct
+        // tag with a large walked.ElementSize the product can overflow int
+        // and come back negative, defeating the bound check and letting a
+        // crafted request write past the end of the tag buffer. Compute in
+        // long and double-check against tag.DataSize explicitly, mirroring
+        // the non-walked HandleWriteTagFragmented variant.
+        long totalBytes = (long)elementCount * walked.ElementSize;
         int writeLen = data.Length - headerLen;
-        if (byteOffsetInMember + (uint)writeLen > (uint)totalBytes)
+        if ((long)byteOffsetInMember + writeLen > totalBytes)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2104));
+        if ((long)walked.Offset + byteOffsetInMember + writeLen > tag.DataSize)
+            return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2105));
 
         tag.SetData(span.Slice(headerLen, writeLen), walked.Offset + (int)byteOffsetInMember);
         return CipServiceResponse.Success(serviceCode);
