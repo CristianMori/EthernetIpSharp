@@ -64,6 +64,20 @@ public static class MultiServiceHandler
         for (int i = 0; i < serviceCount; i++)
             offsets[i] = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(2 + i * 2));
 
+        // Validate the full offset table BEFORE dispatching anything. Offsets must
+        // be monotonically non-decreasing, must start at or after the offset table
+        // itself, and must stay within the request body. If we discovered a bad
+        // offset mid-batch, earlier sub-requests would have already executed
+        // (writes committed) before the handler threw on a bad Slice — a partial
+        // commit the caller has no way to roll back.
+        for (int i = 0; i < serviceCount; i++)
+        {
+            if (offsets[i] < headerSize || offsets[i] > request.Data.Length)
+                return CipServiceResponse.Error(request.ServiceCode, CipStatus.Error(0x13));
+            if (i > 0 && offsets[i] < offsets[i - 1])
+                return CipServiceResponse.Error(request.ServiceCode, CipStatus.Error(0x13));
+        }
+
         // Encode each sub-response into a shared buffer to avoid per-response 4KB allocations
         var encodeBuf = ArrayPool<byte>.Shared.Rent(MaxSingleResponseSize);
         try
