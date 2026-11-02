@@ -354,6 +354,28 @@ def test_pycomm3_every_atomic_type_round_trips(sample_host):
               not w.error and not r.error and abs(r.value - 7.77) < 1e-4,
               {"w": w.error, "r": r.error, "val": r.value})
 
+        # TIMER UDT — same access pattern as a user UDT; this is just an
+        # explicit witness that `MyTimer.PRE` and `MyTimer.EN` work.
+        r = plc.read("MyTimer.PRE")
+        check("TIMER MyTimer.PRE read", not r.error and r.value == 1000, {"err": r.error, "val": r.value})
+        r = plc.read("MyTimer.EN")
+        check("TIMER MyTimer.EN read", not r.error and bool(r.value) is True, {"err": r.error, "val": r.value})
+        w = plc.write(("MyTimer.PRE", 2000)); r = plc.read("MyTimer.PRE")
+        check("TIMER MyTimer.PRE write", not w.error and r.value == 2000, {"w": w.error, "back": r.value})
+        w = plc.write(("MyTimer.EN", False)); r = plc.read("MyTimer.EN")
+        check("TIMER MyTimer.EN write", not w.error and bool(r.value) is False, {"w": w.error, "back": r.value})
+
+        # AOI-backing UDT — same mechanism, confirming AOI tags are not
+        # special on the wire.
+        r = plc.read("MyAOI.Enable")
+        check("AOI MyAOI.Enable read", not r.error and bool(r.value) is True, {"err": r.error, "val": r.value})
+        r = plc.read("MyAOI.Setpoint")
+        check("AOI MyAOI.Setpoint read", not r.error and abs(r.value - 42.5) < 1e-5, {"err": r.error, "val": r.value})
+        w = plc.write(("MyAOI.Setpoint", 99.9)); r = plc.read("MyAOI.Setpoint")
+        check("AOI MyAOI.Setpoint write", not w.error and abs(r.value - 99.9) < 1e-5, {"w": w.error, "back": r.value})
+        w = plc.write(("MyAOI.Enable", False)); r = plc.read("MyAOI.Enable")
+        check("AOI MyAOI.Enable write", not w.error and bool(r.value) is False, {"w": w.error, "back": r.value})
+
         # Rows 39-40: multi-service batch read AND batch write
         batch = plc.read("DintArr[0]", "DintArr[1]", "DintArr[2]")
         check("39 batch read",

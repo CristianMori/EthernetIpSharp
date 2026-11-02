@@ -128,6 +128,45 @@ var motorA = tags.AddTag("MotorA", motorTpl);
     motorA.SetData(buf);
 }
 tags.AddTag("MotorArr", motorTpl, elementCount: 3);
+
+// TIMER / COUNTER / CONTROL / AOI-backing proof: all four are "just UDTs"
+// from pycomm3's perspective — same access pattern as Motor.*, same Template
+// Object plumbing.  Register a Logix-shape TIMER (EN, TT, DN, PRE, ACC) and
+// an AOI-shape UDT and seed them so the test can prove MyTimer.PRE /
+// MyTimer.EN / MyAOI.Enable all round-trip.
+var timerTpl = tags.AddTemplate("TIMER",
+    new TemplateMember("EN",  LogixDataTypes.BOOL),
+    new TemplateMember("TT",  LogixDataTypes.BOOL),
+    new TemplateMember("DN",  LogixDataTypes.BOOL),
+    new TemplateMember("PRE", LogixDataTypes.DINT),
+    new TemplateMember("ACC", LogixDataTypes.DINT));
+var myTimer = tags.AddTag("MyTimer", timerTpl);
+{
+    // Layout: EN/TT/DN packed into host SINT byte @ offset 0 (bits 0/1/2);
+    // PRE DINT @ offset 4; ACC DINT @ offset 8; total 12 bytes.
+    var buf = new byte[(int)timerTpl.StructureSize];
+    buf[0] = 0x01;                                          // EN = True
+    BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(4), 1000);  // PRE
+    BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(8), 250);   // ACC
+    myTimer.SetData(buf);
+}
+
+var aoiTpl = tags.AddTemplate("MixerAOI",
+    new TemplateMember("Enable",   LogixDataTypes.BOOL),
+    new TemplateMember("Setpoint", LogixDataTypes.REAL),
+    new TemplateMember("Done",     LogixDataTypes.BOOL),
+    new TemplateMember("Steps",    LogixDataTypes.DINT));
+var myAoi = tags.AddTag("MyAOI", aoiTpl);
+{
+    // Layout: Enable @ host SINT byte 0 bit 0; Setpoint REAL @ offset 4;
+    // Done @ host SINT byte 8 bit 0; Steps DINT @ offset 12; total 16 bytes.
+    var buf = new byte[(int)aoiTpl.StructureSize];
+    buf[0] = 0x01;                                             // Enable = True
+    BinaryPrimitives.WriteSingleLittleEndian(buf.AsSpan(4), 42.5f);
+    buf[8] = 0x00;                                             // Done = False
+    BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(12), 7); // Steps
+    myAoi.SetData(buf);
+}
 // -----------------------------------------------------------------------
 
 var dispatcher = new LogixDispatcher(tags, identity);
@@ -144,7 +183,7 @@ Console.WriteLine("Tags: TestBool, TestSint, TestInt, TestDint, TestLint, TestUs
                   "TestUint, TestUdint, TestUlint, TestReal, TestLreal, TestByte, " +
                   "TestWord, TestDword, TestLword, TestShortString, " +
                   "DintArr, FlagsDint, Flags32, Matrix, Greeting, GreetingArr, " +
-                  "MotorA, MotorArr");
+                  "MotorA, MotorArr, MyTimer, MyAOI");
 Console.WriteLine("Ready. Press Ctrl+C to stop.");
 Console.Out.Flush();
 
