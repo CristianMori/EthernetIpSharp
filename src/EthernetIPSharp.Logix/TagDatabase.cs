@@ -515,11 +515,17 @@ public sealed class TemplateDefinition
         StructureSize = structureSize;
         Members = members;
 
-        // Definition size = (member_count * 8 bytes per member + name bytes + padding) / 4
+        // Template Object attribute 4 (object_definition_size) is reported in 32-bit
+        // words.  pycomm3 and Studio 5000 compute the member-data byte count as
+        // `(definition_size * 4) - 21`, where 21 is the fixed per-template boilerplate
+        // Studio exports (header + CRC fields that are not part of the member blob
+        // our Template_Read service returns).  Size the attribute to include that
+        // 21-byte header so a client's single-shot request matches the data we have
+        // available and the handler returns SUCCESS on the first chunk rather than
+        // looping on PARTIAL (0x06) forever.
         int nameBytes = name.Length + 1; // null-terminated
         foreach (var m in members) nameBytes += m.Name.Length + 1;
-        int totalBytes = members.Length * 8 + nameBytes;
-        totalBytes = (totalBytes + 3) / 4 * 4; // pad to 32-bit
-        DefinitionSize = (uint)(totalBytes / 4) + 6; // +6 for header words (+23 bytes overhead)
+        int memberDataBytes = members.Length * 8 + nameBytes;
+        DefinitionSize = (uint)((21 + memberDataBytes + 3) / 4);
     }
 }
