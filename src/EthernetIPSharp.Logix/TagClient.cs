@@ -743,9 +743,13 @@ public sealed class TagClient : IAsyncDisposable
             }
         }
 
-        // Step 2: Template Read (0x4C) — get member info + names
-        // Read size = (definitionSize * 4) - 23
-        int readSize = (int)(definitionSize * 4) - 23;
+        // Step 2: Template Read (0x4C) — get member info + names.
+        // Attribute 4 (object_definition_size) is reported in 32-bit words and
+        // includes a 21-byte Studio-5000 boilerplate overhead that the server
+        // never emits, so the body on the wire is `def_size * 4 - 21` bytes.
+        // pycomm3 uses the same constant; -23 under-reads by two bytes and
+        // leaves the server with trailing data it keeps advertising as PARTIAL.
+        int readSize = (int)(definitionSize * 4) - 21;
         if (readSize <= 0) readSize = 256;
 
         var members = new List<TemplateMemberDetail>();
@@ -768,7 +772,9 @@ public sealed class TagClient : IAsyncDisposable
             allDefData.AddRange(readData);
             readOffset += (uint)readData.Length;
 
-            if (readStatus == 0x00) break;
+            // A PARTIAL reply that carries no bytes would spin the loop forever
+            // at the same offset — treat it as end-of-stream.
+            if (readStatus == 0x00 || readData.Length == 0) break;
         }
 
         var defBytes = allDefData.ToArray();
