@@ -102,6 +102,29 @@ public static class TagServices
 
         int byteOffset = elementOffset * tag.ElementSize;
         int bytesToWrite = elementCount * tag.ElementSize;
+
+        // pycomm3 (and Studio 5000 on Identity attribute 7) write SHORT_STRING
+        // as [length_byte][chars] with no fixed-slot padding — a 5-char value
+        // sends 6 payload bytes, not the full 81.  Accept the shorter payload
+        // when the tag type is 0x00DA, pad the remainder of the slot with
+        // zeros, and let Read_Tag return the same value back.
+        if (tagType == LogixDataTypes.SHORT_STRING && data.Length > headerLen)
+        {
+            byte lengthByte = span[headerLen];
+            int provided = data.Length - headerLen;
+            int expectedShort = 1 + lengthByte;
+            if (provided >= expectedShort && provided < bytesToWrite)
+            {
+                if (byteOffset + bytesToWrite > tag.DataSize)
+                    return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2105));
+
+                var padded = new byte[bytesToWrite];
+                span.Slice(headerLen, provided).CopyTo(padded);
+                tag.SetData(padded, byteOffset);
+                return CipServiceResponse.Success(serviceCode);
+            }
+        }
+
         if (data.Length < headerLen + bytesToWrite)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0x13));
 
