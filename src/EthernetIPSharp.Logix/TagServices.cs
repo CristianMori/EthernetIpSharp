@@ -117,34 +117,50 @@ public static class TagServices
     /// Read Tag Fragmented Service (0x52).
     /// Request: element_count (UINT) + byte_offset (UDINT)
     /// Reply: tag_type (UINT) + data bytes (status 0x06 if more data remains)
+    /// <para><paramref name="elementOffset"/> indexes into the tag's array when
+    /// the request path carried an element segment (Symbol Object instance +
+    /// element); the resulting absolute offset is
+    /// <c>elementOffset * tag.ElementSize + byte_offset</c>, mirroring the
+    /// atomic <see cref="HandleReadTag"/> variant.</para>
     /// </summary>
-    public static CipServiceResponse HandleReadTagFragmented(Tag tag, byte serviceCode, ReadOnlyMemory<byte> data)
+    public static CipServiceResponse HandleReadTagFragmented(Tag tag, byte serviceCode, ReadOnlyMemory<byte> data,
+        int elementOffset = 0)
     {
         if (data.Length < 6)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0x13));
 
         var span = data.Span;
         ushort elementCount = BinaryPrimitives.ReadUInt16LittleEndian(span);
-        uint byteOffset = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(2));
+        uint byteOffsetInElements = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(2));
 
+        int baseOffset = elementOffset * tag.ElementSize;
         int totalBytes = elementCount * tag.ElementSize;
-        if (byteOffset >= (uint)totalBytes)
+        if (byteOffsetInElements >= (uint)totalBytes)
+            return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2105));
+
+        int absoluteOffset = baseOffset + (int)byteOffsetInElements;
+        if (absoluteOffset >= tag.DataSize)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2105));
 
         int prefixLen = IsStructTag(tag) ? 4 : 2;
-        int remaining = totalBytes - (int)byteOffset;
+        int remaining = Math.Min(totalBytes - (int)byteOffsetInElements, tag.DataSize - absoluteOffset);
         int chunkSize = Math.Min(remaining, MaxReplyData - prefixLen);
-        bool moreData = (int)byteOffset + chunkSize < totalBytes;
+        bool moreData = (int)byteOffsetInElements + chunkSize < totalBytes;
 
-        return BuildReadResponse(tag, serviceCode, (int)byteOffset, chunkSize, isPartial: moreData);
+        return BuildReadResponse(tag, serviceCode, absoluteOffset, chunkSize, isPartial: moreData);
     }
 
     /// <summary>
     /// Write Tag Fragmented Service (0x53).
     /// Request: tag_type (UINT) + element_count (UINT) + byte_offset (UDINT) + data
     /// Reply: (empty on success)
+    /// <para><paramref name="elementOffset"/> indexes into the tag's array when
+    /// the request path carried an element segment; the resulting absolute
+    /// offset is <c>elementOffset * tag.ElementSize + byte_offset</c>,
+    /// mirroring the atomic <see cref="HandleWriteTag"/> variant.</para>
     /// </summary>
-    public static CipServiceResponse HandleWriteTagFragmented(Tag tag, byte serviceCode, ReadOnlyMemory<byte> data)
+    public static CipServiceResponse HandleWriteTagFragmented(Tag tag, byte serviceCode, ReadOnlyMemory<byte> data,
+        int elementOffset = 0)
     {
         if (data.Length < 8)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0x13));
@@ -153,7 +169,7 @@ public static class TagServices
         ushort tagType = BinaryPrimitives.ReadUInt16LittleEndian(span);
 
         ushort elementCount;
-        uint byteOffset;
+        uint byteOffsetInElements;
         int headerLen;
 
         if (IsStructTag(tag))
@@ -164,7 +180,7 @@ public static class TagServices
 
             ushort structHandle = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(2));
             elementCount = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(4));
-            byteOffset = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(6));
+            byteOffsetInElements = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(6));
             headerLen = 10;
 
             if (tagType != StructTypeIndicator || structHandle != tag.TagType)
@@ -173,19 +189,22 @@ public static class TagServices
         else
         {
             elementCount = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(2));
-            byteOffset = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(4));
+            byteOffsetInElements = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(4));
             headerLen = 8;
 
             if (tagType != tag.TagType)
                 return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2107));
         }
 
+        int baseOffset = elementOffset * tag.ElementSize;
         int totalBytes = elementCount * tag.ElementSize;
         int writeLen = data.Length - headerLen;
-        if (byteOffset + (uint)writeLen > (uint)totalBytes)
+        if (byteOffsetInElements + (uint)writeLen > (uint)totalBytes)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2104));
+        if (baseOffset + (int)byteOffsetInElements + writeLen > tag.DataSize)
+            return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2105));
 
-        tag.SetData(span.Slice(headerLen, writeLen), (int)byteOffset);
+        tag.SetData(span.Slice(headerLen, writeLen), baseOffset + (int)byteOffsetInElements);
 
         return CipServiceResponse.Success(serviceCode);
     }
