@@ -168,7 +168,12 @@ public sealed class SymbolObject
                 symbolType: 0x1068,
                 tagType: 0x1068,
                 elementSize: 0)))
-            .Where(t => t.InstanceId > startInstance)
+            // pycomm3 (and Studio 5000) resume pagination by sending
+            // instance_id = last_seen + 1 and expect THAT instance to be the
+            // first entry in the next page.  Filtering with > here drops the
+            // exact tag the client just asked for.  Use >=.  Benign at
+            // start = 0 because tag instance IDs begin at 1.
+            .Where(t => t.InstanceId >= startInstance)
             .OrderBy(t => t.InstanceId)
             .ToList();
 
