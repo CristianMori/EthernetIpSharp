@@ -10,8 +10,10 @@
 // tests/pycomm3/test_pycomm3_roundtrip.py so one test driver can be pointed
 // at either server.
 
+using System.Buffers.Binary;
 using System.Globalization;
 using System.Net;
+using System.Text;
 using EthernetIPSharp.Cip;
 using EthernetIPSharp.Logix;
 using EthernetIPSharp.Protocol;
@@ -80,6 +82,54 @@ tags.AddTag("TestLword", LogixDataTypes.LWORD).Write<ulong> (0, 0x123456789ABCDE
 // SHORT_STRING — left empty; pycomm3 writes "hello" and reads it back.
 tags.AddTag("TestShortString", LogixDataTypes.SHORT_STRING);
 
+// ----- Yellow-row coverage ---------------------------------------------
+// 1-D array of atomics (DintArr[10]), bit of atomic (FlagsDint), BOOL array
+// (Flags32), multi-dim array (Matrix[2,3]).  Names + seed values mirror the
+// Python test's _spawn_server function one-for-one.
+var dintArr = tags.AddTag("DintArr", LogixDataTypes.DINT, elementCount: 10);
+for (int i = 0; i < 10; i++) dintArr.Write<int>(i * 4, 100 + i);
+
+tags.AddTag("FlagsDint", LogixDataTypes.DINT).Write<uint>(0, 0b1010_1010_1010_1010u);
+tags.AddTag("Flags32", LogixDataTypes.BOOL, elementCount: 32);
+
+var matrix = tags.AddTag("Matrix", LogixDataTypes.DINT, new uint[] { 2, 3 });
+for (int r = 0; r < 2; r++)
+    for (int c = 0; c < 3; c++)
+        matrix.Write<int>((r * 3 + c) * 4, 10 * r + c);
+
+// Logix STRING UDT (LEN:DINT + DATA:SINT[82], 88 bytes on the wire).
+var stringTpl = tags.AddTemplate("STRING",
+    new TemplateMember("LEN",  LogixDataTypes.DINT),
+    new TemplateMember("DATA", LogixDataTypes.SINT, arraySize: 82));
+var greeting = tags.AddTag("Greeting", stringTpl);
+{
+    var buf = new byte[(int)stringTpl.StructureSize];
+    byte[] hello = Encoding.ASCII.GetBytes("Hello pycomm3");
+    BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(0), hello.Length);
+    Array.Copy(hello, 0, buf, 4, hello.Length);
+    greeting.SetData(buf);
+}
+tags.AddTag("GreetingArr", stringTpl, elementCount: 3);
+
+// User UDT with REAL + BOOL + DINT members.
+var motorTpl = tags.AddTemplate("Motor",
+    new TemplateMember("Speed",    LogixDataTypes.REAL),
+    new TemplateMember("Fault",    LogixDataTypes.BOOL),
+    new TemplateMember("RunCount", LogixDataTypes.DINT));
+var motorA = tags.AddTag("MotorA", motorTpl);
+{
+    // Seed: Speed=3.14, Fault=true, RunCount=42.  Member offsets come from the
+    // template Logix produces: Speed@0 (REAL,4), Fault@4 (BOOL bit 0 of a host
+    // SINT), RunCount@8 (DINT, re-aligned to 4).
+    var buf = new byte[(int)motorTpl.StructureSize];
+    BinaryPrimitives.WriteSingleLittleEndian(buf.AsSpan(0), 3.14f);
+    buf[4] = 1;
+    BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(8), 42);
+    motorA.SetData(buf);
+}
+tags.AddTag("MotorArr", motorTpl, elementCount: 3);
+// -----------------------------------------------------------------------
+
 var dispatcher = new LogixDispatcher(tags, identity);
 var adapter    = new EipAdapter(dispatcher, identity);
 
@@ -92,7 +142,9 @@ await adapter.ListenAsync(IPAddress.Parse(bind), port, cts.Token);
 Console.WriteLine($"SampleLogixHost listening on {bind}:{port}");
 Console.WriteLine("Tags: TestBool, TestSint, TestInt, TestDint, TestLint, TestUsint, " +
                   "TestUint, TestUdint, TestUlint, TestReal, TestLreal, TestByte, " +
-                  "TestWord, TestDword, TestLword, TestShortString");
+                  "TestWord, TestDword, TestLword, TestShortString, " +
+                  "DintArr, FlagsDint, Flags32, Matrix, Greeting, GreetingArr, " +
+                  "MotorA, MotorArr");
 Console.WriteLine("Ready. Press Ctrl+C to stop.");
 Console.Out.Flush();
 
