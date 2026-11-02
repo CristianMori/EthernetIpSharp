@@ -169,6 +169,23 @@ var myAoi = tags.AddTag("MyAOI", aoiTpl);
 }
 // -----------------------------------------------------------------------
 
+// Program-scoped tags: pycomm3 enumerates them under the "Program:<name>."
+// prefix (with init_program_tags=True) and reads/writes them via that prefix.
+// Register MainProgram with a scalar, a REAL, and a Motor UDT so we exercise
+// atomic + member access through program scope.  Names and seed values mirror
+// the Python port one-for-one.
+var mainProgram = tags.RegisterProgram("MainProgram");
+mainProgram.AddTag("LocalDint", LogixDataTypes.DINT).Write<int>(0, 42);
+mainProgram.AddTag("LocalReal", LogixDataTypes.REAL).Write<float>(0, 3.14f);
+var localMotor = mainProgram.AddTag("LocalMotor", motorTpl);
+{
+    var buf = new byte[(int)motorTpl.StructureSize];
+    BinaryPrimitives.WriteSingleLittleEndian(buf.AsSpan(0), 2.5f);
+    buf[4] = 1;                                               // Fault = True
+    BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(8), 99); // RunCount
+    localMotor.SetData(buf);
+}
+
 var dispatcher = new LogixDispatcher(tags, identity);
 var adapter    = new EipAdapter(dispatcher, identity);
 
