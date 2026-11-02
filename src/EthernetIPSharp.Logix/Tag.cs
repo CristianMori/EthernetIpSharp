@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Threading;
 
 namespace EthernetIPSharp.Logix;
@@ -190,6 +191,67 @@ public sealed class Tag
 
         ValueChanged?.Invoke(this, new TagChangeInfo(byteOffset, 1));
     }
+
+    /// <summary>
+    /// True if this tag holds the CIP SHORT_STRING atomic type (0xDA): one
+    /// USINT length byte followed by ASCII characters.  Independent of the
+    /// Logix STRING UDT which is a structure, not an atomic type.
+    /// </summary>
+    public bool IsSString => (TagType & 0x00FF) == 0xDA;
+
+    /// <summary>
+    /// Read an element of a SHORT_STRING tag as a .NET string.  The on-wire
+    /// layout per element is <c>[len:USINT][chars:ASCII]</c> occupying
+    /// <see cref="LogixDataTypes.ShortStringStorageSize"/> bytes.
+    /// </summary>
+    public string ReadSString(int elementIndex = 0)
+    {
+        if (!IsSString)
+            throw new InvalidOperationException($"Tag '{Name}' is not SHORT_STRING (type=0x{TagType:X4}).");
+        if ((uint)elementIndex >= (uint)ElementCount)
+            throw new ArgumentOutOfRangeException(nameof(elementIndex));
+
+        int offset = elementIndex * ElementSize;
+        int len = _data[offset];
+        return Encoding.ASCII.GetString(_data, offset + 1, len);
+    }
+
+    /// <summary>
+    /// Write a .NET string into an element of a SHORT_STRING tag.  The value
+    /// must be ASCII and at most <see cref="LogixDataTypes.ShortStringMaxLength"/>
+    /// characters long; fires <see cref="ValueChanged"/>.
+    /// </summary>
+    public void WriteSString(int elementIndex, string value)
+    {
+        if (!IsSString)
+            throw new InvalidOperationException($"Tag '{Name}' is not SHORT_STRING (type=0x{TagType:X4}).");
+        if ((uint)elementIndex >= (uint)ElementCount)
+            throw new ArgumentOutOfRangeException(nameof(elementIndex));
+        if (value is null) throw new ArgumentNullException(nameof(value));
+        if (value.Length > LogixDataTypes.ShortStringMaxLength)
+            throw new ArgumentException(
+                $"Value length {value.Length} exceeds SHORT_STRING max of {LogixDataTypes.ShortStringMaxLength}.",
+                nameof(value));
+        foreach (var c in value)
+        {
+            if (c > 0x7F)
+                throw new ArgumentException($"SHORT_STRING only accepts ASCII (U+00..U+7F); got U+{(int)c:X4}.", nameof(value));
+        }
+
+        int offset = elementIndex * ElementSize;
+        _data[offset] = (byte)value.Length;
+        Encoding.ASCII.GetBytes(value, 0, value.Length, _data, offset + 1);
+        // Zero the trailing unused capacity so a shorter string doesn't carry garbage.
+        int tail = offset + 1 + value.Length;
+        int end = offset + ElementSize;
+        if (tail < end)
+            Array.Clear(_data, tail, end - tail);
+
+        ValueChanged?.Invoke(this, new TagChangeInfo(offset, ElementSize));
+    }
+
+    /// <summary>Convenience overload that targets element 0.</summary>
+    public void WriteSString(string value) => WriteSString(0, value);
 
     public override string ToString() => $"{Name} ({ElementCount}x{ElementSize}B, type=0x{TagType:X4})";
 }

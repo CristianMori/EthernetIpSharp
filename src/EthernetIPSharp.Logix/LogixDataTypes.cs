@@ -50,6 +50,23 @@ public static class LogixDataTypes
     /// <summary>LWORD — 64-bit bit string, 8 bytes (CIP Vol 1 §C-6.1).</summary>
     public const ushort LWORD = 0x00D4;
 
+    /// <summary>
+    /// SHORT_STRING — CIP atomic string type (Vol 1 §C-6.3): one USINT length
+    /// byte followed by ASCII characters.  Distinct from the predefined Logix
+    /// STRING UDT (which is a structure with LEN:DINT + DATA:SINT[82]) and
+    /// distinct from CIP STRING (0xD0, UINT length).  Logix controllers do
+    /// not expose application tags as SHORT_STRING, but a Logix-shaped symbol
+    /// service can serve one — Identity attribute 7 (Product Name) is the
+    /// typical place SHORT_STRING appears.
+    /// </summary>
+    public const ushort SHORT_STRING = 0x00DA;
+
+    /// <summary>Maximum character count for a SHORT_STRING tag in this server.</summary>
+    public const int ShortStringMaxLength = 80;
+
+    /// <summary>SHORT_STRING storage size: 1 length byte + <see cref="ShortStringMaxLength"/> chars.</summary>
+    public const int ShortStringStorageSize = 1 + ShortStringMaxLength;
+
     // --- Logix STRING structure layout ---
 
     /// <summary>
@@ -96,6 +113,7 @@ public static class LogixDataTypes
             0xD2 => 2,  // WORD
             0xD3 => 4,  // DWORD
             0xD4 => 8,  // LWORD
+            0xDA => ShortStringStorageSize, // SHORT_STRING (1 length + ShortStringMaxLength chars)
             _ => -1,
         };
     }

@@ -98,14 +98,16 @@ public sealed class SymbolObject
     {
         var tag = GetTagFromInstance(instance);
         if (tag == null) return CipServiceResponse.Error(request.ServiceCode, CipStatus.Error(0x05));
-        return TagServices.HandleReadTagFragmented(tag, request.ServiceCode, request.Data);
+        int elementOffset = (int)(request.Path.ElementId ?? 0);
+        return TagServices.HandleReadTagFragmented(tag, request.ServiceCode, request.Data, elementOffset);
     }
 
     private CipServiceResponse HandleInstanceWriteTagFragmented(CipInstance instance, CipServiceRequest request)
     {
         var tag = GetTagFromInstance(instance);
         if (tag == null) return CipServiceResponse.Error(request.ServiceCode, CipStatus.Error(0x05));
-        return TagServices.HandleWriteTagFragmented(tag, request.ServiceCode, request.Data);
+        int elementOffset = (int)(request.Path.ElementId ?? 0);
+        return TagServices.HandleWriteTagFragmented(tag, request.ServiceCode, request.Data, elementOffset);
     }
 
     private CipServiceResponse HandleInstanceReadModifyWrite(CipInstance instance, CipServiceRequest request)
