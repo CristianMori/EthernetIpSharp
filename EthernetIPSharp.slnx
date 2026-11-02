@@ -14,6 +14,7 @@
     <Project Path="samples/SampleStandardScanner/SampleStandardScanner.csproj" />
     <Project Path="samples/SampleTag/SampleTag.csproj" />
     <Project Path="samples/SampleSafetyScanner/SampleSafetyScanner.csproj" />
+    <Project Path="samples/SampleLogixHost/SampleLogixHost.csproj" />
   </Folder>
   <Folder Name="/packaging/">
     <Project Path="packaging/EthernetIPSharp.Nuget/EthernetIPSharp.Nuget.csproj" />
