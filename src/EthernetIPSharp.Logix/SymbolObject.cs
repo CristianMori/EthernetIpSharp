@@ -152,36 +152,64 @@ public sealed class SymbolObject
         // Starting instance from the request path
         uint startInstance = request.Path.InstanceId ?? 0;
 
-        // Get all tags sorted by instance ID, starting after startInstance.  At
-        // controller scope this includes a pseudo-tag per registered program,
-        // named "Program:<name>", so browsing clients discover which programs
-        // exist and can then send follow-up requests scoped to that program.
-        // Program pseudo-instance ids live in the reserved 0xF000-0xFFFF range.
-        var tags = _tags.AllTags
-            .Concat(_tags.AllPrograms.Select(p => new Tag(
-                instanceId: p.PseudoInstanceId,
-                name: $"Program:{p.Name}",
-                // Symbol type: system-tag bit (0x1000) + Logix Program class code (0x68).
-                // This mirrors the pattern a 1756 uses to mark program pseudo-tags in
-                // controller-scope enumerations; refine against a captured trace if a
-                // client parses this differently.
-                symbolType: 0x1068,
-                tagType: 0x1068,
-                elementSize: 0)))
-            // pycomm3 (and Studio 5000) resume pagination by sending
-            // instance_id = last_seen + 1 and expect THAT instance to be the
-            // first entry in the next page.  Filtering with > here drops the
-            // exact tag the client just asked for.  Use >=.  Benign at
-            // start = 0 because tag instance IDs begin at 1.
+        // Program scope: pycomm3 (and Studio 5000) scopes a browse to a
+        // program by prepending an ANSI symbolic segment "Program:<name>"
+        // to the Class 0x6B + Instance path.  Our path parser joins every
+        // symbolic segment into Path.SymbolicName; a request routed here
+        // at class level that carries that prefix means "enumerate the
+        // tags inside that program", not controller-scope tags.
+        IEnumerable<Tag> source;
+        bool programScope = false;
+        var sym = request.Path.SymbolicName;
+        if (sym != null && sym.StartsWith("Program:", StringComparison.OrdinalIgnoreCase))
+        {
+            var programName = sym.Substring("Program:".Length);
+            var program = _tags.FindProgram(programName);
+            if (program == null)
+                return CipServiceResponse.Error(request.ServiceCode, CipStatus.Error(0x05));
+            source = program.AllTags;
+            programScope = true;
+        }
+        else
+        {
+            // Controller scope: real tags plus a pseudo-tag per registered program
+            // named "Program:<name>", so browsing clients discover which programs
+            // exist and can then send follow-up requests scoped to that program.
+            // Program pseudo-instance ids live in the reserved 0xF000-0xFFFF range.
+            source = _tags.AllTags
+                .Concat(_tags.AllPrograms.Select(p => new Tag(
+                    instanceId: p.PseudoInstanceId,
+                    name: $"Program:{p.Name}",
+                    // Symbol type: system-tag bit (0x1000) + Logix Program class code (0x68).
+                    // This mirrors the pattern a 1756 uses to mark program pseudo-tags in
+                    // controller-scope enumerations; refine against a captured trace if a
+                    // client parses this differently.
+                    symbolType: 0x1068,
+                    tagType: 0x1068,
+                    elementSize: 0)));
+        }
+
+        // pycomm3 (and Studio 5000) resume pagination by sending
+        // instance_id = last_seen + 1 and expect THAT instance to be the
+        // first entry in the next page.  Filtering with > here drops the
+        // exact tag the client just asked for.  Use >=.  Benign at
+        // start = 0 because tag instance IDs begin at 1.
+        var tags = source
             .Where(t => t.InstanceId >= startInstance)
             .OrderBy(t => t.InstanceId)
             .ToList();
 
-        // Ensure all real tags have CIP instances (skip synthetic program pseudo-tags).
-        foreach (var tag in tags)
+        // Ensure controller-scope real tags have CIP instances (skip synthetic
+        // program pseudo-tags).  Program-scoped tags are addressed symbolically
+        // through LogixDispatcher.OnUnhandled, not via Class 0x6B + Instance N,
+        // so they do not need Symbol Object CIP instances.
+        if (!programScope)
         {
-            if (tag.InstanceId < 0xF000)
-                EnsureInstance(tag);
+            foreach (var tag in tags)
+            {
+                if (tag.InstanceId < 0xF000)
+                    EnsureInstance(tag);
+            }
         }
 
         // Pack response
