@@ -20,6 +20,15 @@ public static class TagServices
 
     private const int MaxReplyData = 480; // ~500 bytes minus overhead
 
+    // Structure tag marker on the wire. CIP Vol 1 §C-4.4.5: a Read_Tag reply
+    // for a structured tag leads with [A0 02][structure_handle (UINT)] followed
+    // by the raw structure bytes; a Write_Tag request uses the same prefix
+    // ahead of element_count and the data. Atomic tags carry only the 2-byte
+    // type code. libplctag and pycomm3 both enforce this split.
+    private const ushort StructTypeIndicator = 0x02A0;
+
+    private static bool IsStructTag(Tag tag) => LogixDataTypes.IsStruct(tag.SymbolType);
+
     /// <summary>
     /// Read Tag Service (0x4C).
     /// Request: element_count (UINT)
@@ -40,12 +49,13 @@ public static class TagServices
         if (byteOffset + bytesToRead > tag.DataSize)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2105));
 
-        int responseLen = 2 + bytesToRead;
+        int prefixLen = IsStructTag(tag) ? 4 : 2;
+        int responseLen = prefixLen + bytesToRead;
 
         // Check if data fits in reply
         if (responseLen > MaxReplyData)
         {
-            int fitBytes = MaxReplyData - 2;
+            int fitBytes = MaxReplyData - prefixLen;
             return BuildReadResponse(tag, serviceCode, byteOffset, fitBytes, isPartial: true);
         }
 
@@ -65,20 +75,40 @@ public static class TagServices
 
         var span = data.Span;
         ushort tagType = BinaryPrimitives.ReadUInt16LittleEndian(span);
-        ushort elementCount = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(2));
 
-        if (tagType != tag.TagType)
-            return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2107));
+        ushort elementCount;
+        int headerLen;
+
+        if (IsStructTag(tag))
+        {
+            if (data.Length < 6)
+                return CipServiceResponse.Error(serviceCode, CipStatus.Error(0x13));
+
+            ushort structHandle = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(2));
+            elementCount = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(4));
+            headerLen = 6;
+
+            if (tagType != StructTypeIndicator || structHandle != tag.TagType)
+                return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2107));
+        }
+        else
+        {
+            elementCount = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(2));
+            headerLen = 4;
+
+            if (tagType != tag.TagType)
+                return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2107));
+        }
 
         int byteOffset = elementOffset * tag.ElementSize;
         int bytesToWrite = elementCount * tag.ElementSize;
-        if (data.Length < 4 + bytesToWrite)
+        if (data.Length < headerLen + bytesToWrite)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0x13));
 
         if (byteOffset + bytesToWrite > tag.DataSize)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2105));
 
-        tag.SetData(span.Slice(4, bytesToWrite), byteOffset);
+        tag.SetData(span.Slice(headerLen, bytesToWrite), byteOffset);
 
         return CipServiceResponse.Success(serviceCode);
     }
@@ -101,8 +131,9 @@ public static class TagServices
         if (byteOffset >= (uint)totalBytes)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2105));
 
+        int prefixLen = IsStructTag(tag) ? 4 : 2;
         int remaining = totalBytes - (int)byteOffset;
-        int chunkSize = Math.Min(remaining, MaxReplyData - 2);
+        int chunkSize = Math.Min(remaining, MaxReplyData - prefixLen);
         bool moreData = (int)byteOffset + chunkSize < totalBytes;
 
         return BuildReadResponse(tag, serviceCode, (int)byteOffset, chunkSize, isPartial: moreData);
@@ -120,18 +151,41 @@ public static class TagServices
 
         var span = data.Span;
         ushort tagType = BinaryPrimitives.ReadUInt16LittleEndian(span);
-        ushort elementCount = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(2));
-        uint byteOffset = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(4));
 
-        if (tagType != tag.TagType)
-            return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2107));
+        ushort elementCount;
+        uint byteOffset;
+        int headerLen;
+
+        if (IsStructTag(tag))
+        {
+            // Struct fragmented write: [0x02A0][struct_handle][count][offset][data...]
+            if (data.Length < 10)
+                return CipServiceResponse.Error(serviceCode, CipStatus.Error(0x13));
+
+            ushort structHandle = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(2));
+            elementCount = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(4));
+            byteOffset = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(6));
+            headerLen = 10;
+
+            if (tagType != StructTypeIndicator || structHandle != tag.TagType)
+                return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2107));
+        }
+        else
+        {
+            elementCount = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(2));
+            byteOffset = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(4));
+            headerLen = 8;
+
+            if (tagType != tag.TagType)
+                return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2107));
+        }
 
         int totalBytes = elementCount * tag.ElementSize;
-        if (byteOffset + (uint)(data.Length - 8) > (uint)totalBytes)
+        int writeLen = data.Length - headerLen;
+        if (byteOffset + (uint)writeLen > (uint)totalBytes)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2104));
 
-        int writeLen = data.Length - 8;
-        tag.SetData(span.Slice(8, writeLen), (int)byteOffset);
+        tag.SetData(span.Slice(headerLen, writeLen), (int)byteOffset);
 
         return CipServiceResponse.Success(serviceCode);
     }
@@ -178,13 +232,33 @@ public static class TagServices
 
     /// <summary>
     /// Shared helper to build a Read Tag / Read Tag Fragmented response.
-    /// Uses ArrayPool to avoid per-call allocations on the hot read path.
+    /// Whole-tag path: emits [0x02A0][struct_handle][data] for structured tags
+    /// and [type_code][data] for atomic. Uses ArrayPool to avoid per-call
+    /// allocations on the hot read path.
     /// </summary>
     private static CipServiceResponse BuildReadResponse(Tag tag, byte serviceCode,
         int byteOffset, int dataLength, bool isPartial)
-        => BuildReadResponseWithType(tag, serviceCode, byteOffset, dataLength, isPartial, tag.TagType);
+    {
+        if (IsStructTag(tag))
+            return BuildStructReadResponse(tag, serviceCode, byteOffset, dataLength, isPartial, tag.TagType);
+        return BuildAtomicReadResponse(tag, serviceCode, byteOffset, dataLength, isPartial, tag.TagType);
+    }
 
-    private static CipServiceResponse BuildReadResponseWithType(Tag tag, byte serviceCode,
+    /// <summary>
+    /// Walker-aware variant. The caller resolves the struct-vs-atomic decision
+    /// (from <c>walked.Template != null</c>) and passes the correct type code —
+    /// for atomics the CIP type code, for structs the structure handle (used
+    /// after the 0x02A0 indicator on the wire).
+    /// </summary>
+    private static CipServiceResponse BuildReadResponseAtomicOrStruct(Tag tag, byte serviceCode,
+        int byteOffset, int dataLength, bool isPartial, ushort typeOrHandle, bool asStruct)
+    {
+        return asStruct
+            ? BuildStructReadResponse(tag, serviceCode, byteOffset, dataLength, isPartial, typeOrHandle)
+            : BuildAtomicReadResponse(tag, serviceCode, byteOffset, dataLength, isPartial, typeOrHandle);
+    }
+
+    private static CipServiceResponse BuildAtomicReadResponse(Tag tag, byte serviceCode,
         int byteOffset, int dataLength, bool isPartial, ushort typeCode)
     {
         int responseLen = 2 + dataLength;
@@ -193,26 +267,48 @@ public static class TagServices
         {
             BinaryPrimitives.WriteUInt16LittleEndian(rented, typeCode);
             tag.GetData(byteOffset, dataLength).CopyTo(rented.AsSpan(2));
-
-            // Copy to exact-sized array for the response (ArrayPool may over-allocate)
-            var result = rented.AsSpan(0, responseLen).ToArray();
-
-            if (isPartial)
-            {
-                return new CipServiceResponse
-                {
-                    ServiceCode = (byte)(serviceCode | 0x80),
-                    Status = CipStatus.Error(0x06),
-                    Data = result,
-                };
-            }
-
-            return CipServiceResponse.Success(serviceCode, result);
+            return FinalizeReadResponse(serviceCode, rented, responseLen, isPartial);
         }
         finally
         {
             ArrayPool<byte>.Shared.Return(rented);
         }
+    }
+
+    private static CipServiceResponse BuildStructReadResponse(Tag tag, byte serviceCode,
+        int byteOffset, int dataLength, bool isPartial, ushort structHandle)
+    {
+        int responseLen = 4 + dataLength;
+        var rented = ArrayPool<byte>.Shared.Rent(responseLen);
+        try
+        {
+            BinaryPrimitives.WriteUInt16LittleEndian(rented, StructTypeIndicator);
+            BinaryPrimitives.WriteUInt16LittleEndian(rented.AsSpan(2), structHandle);
+            tag.GetData(byteOffset, dataLength).CopyTo(rented.AsSpan(4));
+            return FinalizeReadResponse(serviceCode, rented, responseLen, isPartial);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+
+    private static CipServiceResponse FinalizeReadResponse(byte serviceCode, byte[] rented,
+        int responseLen, bool isPartial)
+    {
+        var result = rented.AsSpan(0, responseLen).ToArray();
+
+        if (isPartial)
+        {
+            return new CipServiceResponse
+            {
+                ServiceCode = (byte)(serviceCode | 0x80),
+                Status = CipStatus.Error(0x06),
+                Data = result,
+            };
+        }
+
+        return CipServiceResponse.Success(serviceCode, result);
     }
 
     // --- Walker-aware variants ---
@@ -248,13 +344,20 @@ public static class TagServices
         if (walked.Offset + bytesToRead > tag.DataSize)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2105));
 
-        int responseLen = 2 + bytesToRead;
+        // A walker that ends on a nested struct member carries a non-null Template
+        // and the structure handle is on the Template. Atomic members have a plain
+        // CIP type code in walked.TypeCode and no Template.
+        bool asStruct = walked.Template is not null;
+        ushort typeOrHandle = asStruct ? walked.Template!.StructureHandle : walked.TypeCode;
+        int prefixLen = asStruct ? 4 : 2;
+
+        int responseLen = prefixLen + bytesToRead;
         if (responseLen > MaxReplyData)
         {
-            int fitBytes = MaxReplyData - 2;
-            return BuildReadResponseWithType(tag, serviceCode, walked.Offset, fitBytes, isPartial: true, walked.TypeCode);
+            int fitBytes = MaxReplyData - prefixLen;
+            return BuildReadResponseAtomicOrStruct(tag, serviceCode, walked.Offset, fitBytes, isPartial: true, typeOrHandle, asStruct);
         }
-        return BuildReadResponseWithType(tag, serviceCode, walked.Offset, bytesToRead, isPartial: false, walked.TypeCode);
+        return BuildReadResponseAtomicOrStruct(tag, serviceCode, walked.Offset, bytesToRead, isPartial: false, typeOrHandle, asStruct);
     }
 
     /// <summary>Write Tag at a walker-resolved target (member, element, or BOOL bit).</summary>
@@ -266,32 +369,53 @@ public static class TagServices
 
         var span = data.Span;
         ushort tagType = BinaryPrimitives.ReadUInt16LittleEndian(span);
-        ushort elementCount = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(2));
 
-        if (tagType != walked.TypeCode)
-            return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2107));
+        bool asStruct = walked.Template is not null;
+        ushort elementCount;
+        int headerLen;
+
+        if (asStruct)
+        {
+            if (data.Length < 6)
+                return CipServiceResponse.Error(serviceCode, CipStatus.Error(0x13));
+
+            ushort structHandle = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(2));
+            elementCount = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(4));
+            headerLen = 6;
+
+            if (tagType != StructTypeIndicator || structHandle != walked.Template!.StructureHandle)
+                return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2107));
+        }
+        else
+        {
+            elementCount = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(2));
+            headerLen = 4;
+
+            if (tagType != walked.TypeCode)
+                return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2107));
+        }
 
         // BOOL member bit write: atomic RMW on the host byte via Interlocked so
         // two writers to different bits of the same host byte cannot stomp each
         // other. Cost is a single locked instruction per bit write.
         if (walked.BitPos.HasValue)
         {
-            if (elementCount != 1 || data.Length < 5)
+            if (elementCount != 1 || data.Length < headerLen + 1)
                 return CipServiceResponse.Error(serviceCode, CipStatus.Error(0x13));
 
-            bool newValue = (span[4] & 0x01) != 0;
+            bool newValue = (span[headerLen] & 0x01) != 0;
             tag.AtomicSetBit(walked.Offset, walked.BitPos.Value, newValue);
             return CipServiceResponse.Success(serviceCode);
         }
 
         int bytesToWrite = elementCount * walked.ElementSize;
-        if (data.Length < 4 + bytesToWrite)
+        if (data.Length < headerLen + bytesToWrite)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0x13));
 
         if (walked.Offset + bytesToWrite > tag.DataSize)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2105));
 
-        tag.SetData(span.Slice(4, bytesToWrite), walked.Offset);
+        tag.SetData(span.Slice(headerLen, bytesToWrite), walked.Offset);
         return CipServiceResponse.Success(serviceCode);
     }
 
@@ -353,12 +477,16 @@ public static class TagServices
         if (byteOffsetInMember >= (uint)totalBytes)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2105));
 
+        bool asStruct = walked.Template is not null;
+        ushort typeOrHandle = asStruct ? walked.Template!.StructureHandle : walked.TypeCode;
+        int prefixLen = asStruct ? 4 : 2;
+
         int remaining = totalBytes - (int)byteOffsetInMember;
-        int chunkSize = Math.Min(remaining, MaxReplyData - 2);
+        int chunkSize = Math.Min(remaining, MaxReplyData - prefixLen);
         bool moreData = (int)byteOffsetInMember + chunkSize < totalBytes;
         int absoluteOffset = walked.Offset + (int)byteOffsetInMember;
 
-        return BuildReadResponseWithType(tag, serviceCode, absoluteOffset, chunkSize, isPartial: moreData, walked.TypeCode);
+        return BuildReadResponseAtomicOrStruct(tag, serviceCode, absoluteOffset, chunkSize, isPartial: moreData, typeOrHandle, asStruct);
     }
 
     /// <summary>Fragmented Write at a walker-resolved base offset.</summary>
@@ -372,18 +500,42 @@ public static class TagServices
 
         var span = data.Span;
         ushort tagType = BinaryPrimitives.ReadUInt16LittleEndian(span);
-        ushort elementCount = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(2));
-        uint byteOffsetInMember = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(4));
 
-        if (tagType != walked.TypeCode)
-            return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2107));
+        bool asStruct = walked.Template is not null;
+        ushort elementCount;
+        uint byteOffsetInMember;
+        int headerLen;
+
+        if (asStruct)
+        {
+            // Struct fragmented write: [0x02A0][struct_handle][count][offset][data...]
+            if (data.Length < 10)
+                return CipServiceResponse.Error(serviceCode, CipStatus.Error(0x13));
+
+            ushort structHandle = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(2));
+            elementCount = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(4));
+            byteOffsetInMember = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(6));
+            headerLen = 10;
+
+            if (tagType != StructTypeIndicator || structHandle != walked.Template!.StructureHandle)
+                return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2107));
+        }
+        else
+        {
+            elementCount = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(2));
+            byteOffsetInMember = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(4));
+            headerLen = 8;
+
+            if (tagType != walked.TypeCode)
+                return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2107));
+        }
 
         int totalBytes = elementCount * walked.ElementSize;
-        int writeLen = data.Length - 8;
+        int writeLen = data.Length - headerLen;
         if (byteOffsetInMember + (uint)writeLen > (uint)totalBytes)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2104));
 
-        tag.SetData(span.Slice(8, writeLen), walked.Offset + (int)byteOffsetInMember);
+        tag.SetData(span.Slice(headerLen, writeLen), walked.Offset + (int)byteOffsetInMember);
         return CipServiceResponse.Success(serviceCode);
     }
 }
