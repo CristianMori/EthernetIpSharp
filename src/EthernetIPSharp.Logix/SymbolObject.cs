@@ -43,8 +43,17 @@ public sealed class SymbolObject
         CipClass.AddInstanceService(new CipServiceDefinition(
             TagServices.ReadModifyWrite, "Read_Modify_Write", HandleInstanceReadModifyWrite));
 
-        // Class-level service: Get_Instance_Attribute_List for tag browsing
+        // Get_Instance_Attribute_List for tag browsing — registered at BOTH
+        // class AND instance level.  pycomm3 (and real Studio 5000) continue
+        // pagination by sending the request with path = Class 0x6B + Instance
+        // <last_seen+1>, which routes as an instance-level call.  Without the
+        // instance-side registration the second page comes back 0x08
+        // (SERVICE_NOT_SUPPORTED) and the browse aborts.  The handler already
+        // uses request.Path.InstanceId ?? 0 as the start cursor, so routing
+        // to a tag's "instance" at the same handler is correct.
         CipClass.AddClassService(new CipServiceDefinition(
+            GetInstanceAttributeList, "Get_Instance_Attribute_List", HandleGetInstanceAttributeList));
+        CipClass.AddInstanceService(new CipServiceDefinition(
             GetInstanceAttributeList, "Get_Instance_Attribute_List", HandleGetInstanceAttributeList));
     }
 
