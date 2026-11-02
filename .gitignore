@@ -11,3 +11,8 @@ tools/bflat/bflat*
 tools/bflat/*.zip
 settings.local.json
 artifacts/
+
+# Python caches from the pycomm3 round-trip test suite.
+__pycache__/
+*.pyc
+.pytest_cache/
