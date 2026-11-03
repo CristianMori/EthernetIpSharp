@@ -43,10 +43,20 @@ public static class TagServices
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0x13));
 
         ushort elementCount = BinaryPrimitives.ReadUInt16LittleEndian(data.Span);
-        int byteOffset = elementOffset * tag.ElementSize;
-        int bytesToRead = elementCount * tag.ElementSize;
+        // elementCount is UINT16 and tag.ElementSize is int. For a struct tag
+        // whose ElementSize is well into the tens of thousands of bytes the
+        // product overflows int and comes back negative, defeating the bound
+        // check below and tripping ArrayPool.Rent(2 + negative) further down
+        // the hot path. Compute the product in long and reject anything that
+        // cannot fit in int before narrowing.
+        long bytesToReadLong = (long)elementCount * tag.ElementSize;
+        if (bytesToReadLong < 0 || bytesToReadLong > int.MaxValue)
+            return CipServiceResponse.Error(serviceCode, CipStatus.Error(CipStatus.TooMuchData));
 
-        if (byteOffset + bytesToRead > tag.DataSize)
+        int byteOffset = elementOffset * tag.ElementSize;
+        int bytesToRead = (int)bytesToReadLong;
+
+        if ((long)byteOffset + bytesToRead > tag.DataSize)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2105));
 
         int prefixLen = IsStructTag(tag) ? 4 : 2;
@@ -100,8 +110,14 @@ public static class TagServices
                 return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2107));
         }
 
+        // Widen the product before the bound check — see HandleReadTag for
+        // the overflow rationale.
+        long bytesToWriteLong = (long)elementCount * tag.ElementSize;
+        if (bytesToWriteLong < 0 || bytesToWriteLong > int.MaxValue)
+            return CipServiceResponse.Error(serviceCode, CipStatus.Error(CipStatus.TooMuchData));
+
         int byteOffset = elementOffset * tag.ElementSize;
-        int bytesToWrite = elementCount * tag.ElementSize;
+        int bytesToWrite = (int)bytesToWriteLong;
 
         // pycomm3 (and Studio 5000 on Identity attribute 7) write SHORT_STRING
         // as [length_byte][chars] with no fixed-slot padding — a 5-char value
@@ -156,8 +172,15 @@ public static class TagServices
         ushort elementCount = BinaryPrimitives.ReadUInt16LittleEndian(span);
         uint byteOffsetInElements = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(2));
 
+        // Widen the product before the bound check — a struct tag with a
+        // large ElementSize paired with elementCount near UINT16_MAX would
+        // otherwise overflow int and come back negative.
+        long totalBytesLong = (long)elementCount * tag.ElementSize;
+        if (totalBytesLong < 0 || totalBytesLong > int.MaxValue)
+            return CipServiceResponse.Error(serviceCode, CipStatus.Error(CipStatus.TooMuchData));
+
         int baseOffset = elementOffset * tag.ElementSize;
-        int totalBytes = elementCount * tag.ElementSize;
+        int totalBytes = (int)totalBytesLong;
         if (byteOffsetInElements >= (uint)totalBytes)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2105));
 
@@ -219,12 +242,21 @@ public static class TagServices
                 return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2107));
         }
 
+        // Widen the product before the bound check — a struct tag with a
+        // large ElementSize paired with elementCount near UINT16_MAX would
+        // otherwise overflow int and come back negative, defeating the
+        // bound checks and letting a crafted request write past the tag
+        // buffer. Mirrors the walker-aware HandleWriteTagFragmentedAt variant.
+        long totalBytesLong = (long)elementCount * tag.ElementSize;
+        if (totalBytesLong < 0 || totalBytesLong > int.MaxValue)
+            return CipServiceResponse.Error(serviceCode, CipStatus.Error(CipStatus.TooMuchData));
+
         int baseOffset = elementOffset * tag.ElementSize;
-        int totalBytes = elementCount * tag.ElementSize;
+        long totalBytes = totalBytesLong;
         int writeLen = data.Length - headerLen;
-        if (byteOffsetInElements + (uint)writeLen > (uint)totalBytes)
+        if ((long)byteOffsetInElements + writeLen > totalBytes)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2104));
-        if (baseOffset + (int)byteOffsetInElements + writeLen > tag.DataSize)
+        if ((long)baseOffset + byteOffsetInElements + writeLen > tag.DataSize)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2105));
 
         tag.SetData(span.Slice(headerLen, writeLen), baseOffset + (int)byteOffsetInElements);
