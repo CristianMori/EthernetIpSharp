@@ -135,4 +135,35 @@ public class SafetyConnectionTests
         var result = ConnectionPathParser.Parse(path, fwdOpen);
         Assert.Null(result.SafetySegment);
     }
+
+    [Fact]
+    public void ValidateSafetyOpen_TruncatedSegment_ReturnsCipError()
+    {
+        // Regression: a FwdOpen whose safety segment advertises
+        // DataLengthWords=5 (totalSize=12) used to pass ValidateSafetyOpen's
+        // top-level length check and then let SafetyNetworkSegment.Parse throw
+        // ArgumentOutOfRangeException deep inside the SCTS/TUNID reads. The
+        // exception unwound through ConnectionManagerObject.ProcessForwardOpen
+        // and EipAdapter.HandleSendRRData and was swallowed by TcpSocket with
+        // no CIP reply, stalling the originator.
+        var identity = new IdentityInfo { ProductName = "Safety Test" };
+        var snn = new SafetyNetworkNumber([0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
+        var device = new SafetyDevice(identity, IPAddress.Loopback, snn, 0xC0A80164);
+        var handler = (ISafetyConnectionHandler)device.ConnectionManager.SafetyHandler!;
+
+        var trunc = new byte[12];
+        trunc[0] = 0x50;
+        trunc[1] = 5;    // DataLengthWords: well under the 27-word Target minimum
+        trunc[2] = 0x00;
+
+        var fwdOpen = new ForwardOpenRequest
+        {
+            OtoTParams = new NetworkConnectionParams { ConnectionType = 2 },
+            TtoOParams = new NetworkConnectionParams { ConnectionType = 2 },
+        };
+
+        ushort? rejectCode = handler.ValidateSafetyOpen(trunc, fwdOpen);
+        Assert.True(rejectCode.HasValue, "ValidateSafetyOpen must reject a truncated segment with a CIP code, not throw");
+        Assert.Equal((ushort)0x080E, rejectCode!.Value);
+    }
 }

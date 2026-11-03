@@ -85,11 +85,41 @@ public readonly struct SafetyNetworkSegment
     /// Parse a Safety Network Segment from connection path data.
     /// The input should start at the 0x50 byte.
     /// Returns the parsed segment and number of bytes consumed.
+    /// Throws <see cref="ArgumentException"/> on a truncated or malformed segment.
     /// </summary>
+    /// <remarks>
+    /// Prefer <see cref="TryParse(ReadOnlySpan{byte}, out SafetyNetworkSegment, out int)"/>
+    /// on the request path — a FwdOpen whose safety segment advertises a tiny
+    /// <c>DataLengthWords</c> (e.g. <c>[0x50, 5, 0, …]</c>, total 12 bytes) used
+    /// to pass the length check and then raise <see cref="ArgumentOutOfRangeException"/>
+    /// out of the format-specific reads. That exception unwound through
+    /// ConnectionManagerObject.ProcessForwardOpen and EipAdapter.HandleSendRRData
+    /// into TcpSocketConnection.ReadLoop and was swallowed with no CIP reply,
+    /// stalling the client — the same failure shape ForwardOpenRequest.TryParse
+    /// fixed in commit 6c73b00 and CipPath.TryParse fixed in 5bf636a.
+    /// </remarks>
     public static (SafetyNetworkSegment Segment, int BytesConsumed) Parse(ReadOnlySpan<byte> data)
     {
+        if (!TryParse(data, out var segment, out int bytesConsumed))
+            throw new ArgumentException("Truncated or malformed safety network segment");
+        return (segment, bytesConsumed);
+    }
+
+    /// <summary>
+    /// Non-throwing variant used by the dispatcher. Enforces the format-specific
+    /// minimum total size (56 bytes for Target 0x00, 14 for Router 0x01, 62 for
+    /// Extended 0x02) before any per-field read, and rejects unknown formats.
+    /// Returns <c>false</c> when the segment is truncated, mis-typed, or declares
+    /// a <c>DataLengthWords</c> smaller than the format demands; the caller is
+    /// expected to reply with a CIP Forward Open error (e.g. 0x080E) in that case.
+    /// </summary>
+    public static bool TryParse(ReadOnlySpan<byte> data, out SafetyNetworkSegment segment, out int bytesConsumed)
+    {
+        segment = default;
+        bytesConsumed = 0;
+
         if (data.Length < 3 || data[0] != SegmentType)
-            throw new ArgumentException("Not a safety network segment");
+            return false;
 
         byte dataLenWords = data[1];
         int dataLenBytes = dataLenWords * 2;
@@ -97,18 +127,34 @@ public readonly struct SafetyNetworkSegment
 
         int totalSize = 2 + dataLenBytes; // type(1) + length(1) + data
 
+        // Format-specific minimum totalSize. The declared DataLengthWords must
+        // reach the format's required layout, otherwise subsequent reads of
+        // SCCRC / SCTS / TUNID / … walk past the segment's own buffer.
+        int minTotalSize = format switch
+        {
+            0x00 => 56, // Target format
+            0x01 => 14, // Router format
+            0x02 => 62, // Extended format
+            _ => int.MaxValue, // Unknown format — reject.
+        };
+
+        if (totalSize < minTotalSize)
+            return false;
+
         if (data.Length < totalSize)
-            throw new ArgumentException($"Safety segment requires {totalSize} bytes, got {data.Length}");
+            return false;
 
         if (format == 0x01) // Router format
         {
-            return (new SafetyNetworkSegment
+            segment = new SafetyNetworkSegment
             {
                 Format = 0x01,
                 TimeCorrectionConnectionId = BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(4)),
                 TimeCorrectionEpi = BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(8)),
                 TimeCorrectionParams = BinaryPrimitives.ReadUInt16LittleEndian(data.Slice(12)),
-            }, totalSize);
+            };
+            bytesConsumed = totalSize;
+            return true;
         }
 
         // Target format (0x00) and Extended format (0x02) share the same base layout
@@ -146,7 +192,7 @@ public readonly struct SafetyNetworkSegment
             initRollover = BinaryPrimitives.ReadUInt16LittleEndian(data.Slice(off)); off += 2;
         }
 
-        return (new SafetyNetworkSegment
+        segment = new SafetyNetworkSegment
         {
             Format = format,
             Sccrc = sccrc,
@@ -165,7 +211,9 @@ public readonly struct SafetyNetworkSegment
             TimeCorrectionConnectionId = tcConnId,
             InitialTimeStamp = initTs,
             InitialRolloverValue = initRollover,
-        }, totalSize);
+        };
+        bytesConsumed = totalSize;
+        return true;
     }
 
     /// <summary>

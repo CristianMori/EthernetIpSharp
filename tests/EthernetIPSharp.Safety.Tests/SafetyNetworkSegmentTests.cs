@@ -143,4 +143,76 @@ public class SafetyNetworkSegmentTests
         Assert.Equal(0x12345678u, parsedSeg.Sccrc);
         Assert.Equal(0xAABBCCDDu, parsedSeg.Cpcrc);
     }
+
+    [Fact]
+    public void TryParse_TruncatedFormat0Segment_ReturnsFalseWithoutThrowing()
+    {
+        // DataLengthWords=5 => totalSize=12, well under the 56-byte Target-format
+        // minimum. The pre-fix Parse let this through its data.Length check (buffer
+        // is 12 bytes) and then threw ArgumentOutOfRangeException reading SCTS at
+        // offset 8+. TryParse must reject it cleanly.
+        var trunc = new byte[12];
+        trunc[0] = 0x50; // SegmentType
+        trunc[1] = 5;    // DataLengthWords
+        trunc[2] = 0x00; // Target format
+
+        bool ok = SafetyNetworkSegment.TryParse(trunc, out _, out int consumed);
+        Assert.False(ok);
+        Assert.Equal(0, consumed);
+    }
+
+    [Fact]
+    public void TryParse_TruncatedExtendedFormatSegment_ReturnsFalse()
+    {
+        // Format 0x02 requires totalSize >= 62. DataLengthWords=27 (56-byte Target
+        // size) is enough for 0x00 but not for 0x02.
+        var trunc = new byte[56];
+        trunc[0] = 0x50;
+        trunc[1] = 27;   // 56 bytes, below the 62-byte Extended minimum
+        trunc[2] = 0x02; // Extended format
+
+        bool ok = SafetyNetworkSegment.TryParse(trunc, out _, out _);
+        Assert.False(ok);
+    }
+
+    [Fact]
+    public void TryParse_UnknownFormat_ReturnsFalse()
+    {
+        var buf = new byte[64];
+        buf[0] = 0x50;
+        buf[1] = 30;
+        buf[2] = 0x77; // bogus format
+
+        bool ok = SafetyNetworkSegment.TryParse(buf, out _, out _);
+        Assert.False(ok);
+    }
+
+    [Fact]
+    public void TryParse_BufferShorterThanDeclaredSize_ReturnsFalse()
+    {
+        // DataLengthWords claims a full 27-word Target format segment but the
+        // underlying buffer only holds 20 bytes.
+        var buf = new byte[20];
+        buf[0] = 0x50;
+        buf[1] = 27;
+        buf[2] = 0x00;
+
+        bool ok = SafetyNetworkSegment.TryParse(buf, out _, out _);
+        Assert.False(ok);
+    }
+
+    [Fact]
+    public void Parse_TruncatedFormat0Segment_ThrowsArgumentException()
+    {
+        // External callers that still prefer the throwing shape must see an
+        // ArgumentException — not an unexpected ArgumentOutOfRangeException —
+        // and the message is prefixed so logs stay greppable.
+        var trunc = new byte[12];
+        trunc[0] = 0x50;
+        trunc[1] = 5;
+        trunc[2] = 0x00;
+
+        var ex = Assert.Throws<ArgumentException>(() => SafetyNetworkSegment.Parse(trunc));
+        Assert.Contains("safety network segment", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
 }

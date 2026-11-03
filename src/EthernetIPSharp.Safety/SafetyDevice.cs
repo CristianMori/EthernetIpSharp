@@ -63,10 +63,14 @@ public sealed class SafetyDevice : VirtualDevice, ISafetyConnectionHandler
 
     public ushort? ValidateSafetyOpen(ReadOnlyMemory<byte> safetySegment, ForwardOpenRequest fwdOpen)
     {
-        if (safetySegment.Length < 3 || safetySegment.Span[0] != 0x50)
+        // TryParse rejects both wrong-type-byte segments AND segments whose
+        // declared DataLengthWords is below the format minimum (27/6/30). Using
+        // Parse here used to let [0x50, 5, 0, …] pass the type check and then
+        // raise ArgumentOutOfRangeException deep inside the field reads, which
+        // unwound through the dispatch stack and stalled the client with no CIP
+        // reply. Reply with 0x080E so the originator sees a well-formed error.
+        if (!SafetyNetworkSegment.TryParse(safetySegment.Span, out var seg, out _))
             return 0x080E;
-
-        var (seg, _) = SafetyNetworkSegment.Parse(safetySegment.Span);
 
         // 1. Verify TUNID
         var ourTunid = new byte[UniqueNetworkId.Size];
@@ -119,9 +123,9 @@ public sealed class SafetyDevice : VirtualDevice, ISafetyConnectionHandler
     {
         bool isServer = (fwdOpen.TransportClassTrigger & 0x80) != 0;
 
-        if (conn.SafetySegmentData.Length >= 3 && conn.SafetySegmentData.Span[0] == 0x50)
+        if (conn.SafetySegmentData.Length >= 3 && conn.SafetySegmentData.Span[0] == 0x50
+            && SafetyNetworkSegment.TryParse(conn.SafetySegmentData.Span, out var safetySeg, out _))
         {
-            var (safetySeg, _) = SafetyNetworkSegment.Parse(conn.SafetySegmentData.Span);
             var svInst = _supervisor.CipClass.GetInstance(1);
 
             var cfunidData = new byte[UniqueNetworkId.Size];
