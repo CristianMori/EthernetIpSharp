@@ -20,6 +20,23 @@ public static class MultiServiceHandler
     private const int MaxSingleResponseSize = 520;
 
     /// <summary>
+    /// Maximum number of sub-requests in one MSP. Matches the Python port's
+    /// 4c73edf cap. serviceCount is a UINT16; without this cap a crafted
+    /// request can list 65 535 sub-requests, each returning up to
+    /// <see cref="MaxSingleResponseSize"/> bytes — a ~32 MiB allocation
+    /// amplifier from a single ~128 KiB input frame.
+    /// </summary>
+    private const int MaxServiceCount = 20;
+
+    /// <summary>
+    /// Maximum aggregate MSP response size. The sub-response offset table is
+    /// UINT16, so any aggregate larger than this would silently wrap the
+    /// written offsets and produce an undecodable reply that still carried
+    /// the full (undelivered) allocation.
+    /// </summary>
+    private const int MaxMspResponseSize = ushort.MaxValue;
+
+    /// <summary>
     /// Nested re-entry into the dispatcher (0x0A inside 0x0A, 0x0A inside 0x52,
     /// or the reverse) is capped through <see cref="CipDispatchDepth"/>. The
     /// counter is shared with <see cref="EthernetIPSharp.Connections.ConnectionManagerObject"/>
@@ -52,6 +69,10 @@ public static class MultiServiceHandler
 
         var span = request.Data.Span;
         ushort serviceCount = BinaryPrimitives.ReadUInt16LittleEndian(span);
+
+        // Cap serviceCount before any allocation — see MaxServiceCount.
+        if (serviceCount > MaxServiceCount)
+            return CipServiceResponse.Error(request.ServiceCode, CipStatus.Error(CipStatus.TooMuchData));
 
         int headerSize = 2 + serviceCount * 2;
         if (request.Data.Length < headerSize)
@@ -95,13 +116,18 @@ public static class MultiServiceHandler
                 responses[i] = encodeBuf.AsSpan(0, respLen).ToArray();
             }
 
-            // Build aggregate response
+            // Build aggregate response — size the buffer in long first so a
+            // crafted set of fat sub-responses cannot push the aggregate past
+            // the UINT16 offset-table ceiling and silently wrap the written
+            // offsets into an undecodable reply.
             int respHeaderSize = 2 + serviceCount * 2;
-            int totalRespSize = respHeaderSize;
+            long totalRespSizeLong = respHeaderSize;
             foreach (var r in responses)
-                totalRespSize += r.Length;
+                totalRespSizeLong += r.Length;
+            if (totalRespSizeLong > MaxMspResponseSize)
+                return CipServiceResponse.Error(request.ServiceCode, CipStatus.Error(CipStatus.TooMuchData));
 
-            var result = new byte[totalRespSize];
+            var result = new byte[(int)totalRespSizeLong];
             int offset = 0;
 
             BinaryPrimitives.WriteUInt16LittleEndian(result.AsSpan(offset), serviceCount);
@@ -110,6 +136,8 @@ public static class MultiServiceHandler
             int currentOffset = respHeaderSize;
             for (int i = 0; i < serviceCount; i++)
             {
+                if (currentOffset > ushort.MaxValue)
+                    return CipServiceResponse.Error(request.ServiceCode, CipStatus.Error(CipStatus.TooMuchData));
                 BinaryPrimitives.WriteUInt16LittleEndian(result.AsSpan(offset), (ushort)currentOffset);
                 offset += 2;
                 currentOffset += responses[i].Length;
