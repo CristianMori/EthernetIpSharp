@@ -201,10 +201,15 @@ public static class TagServices
         if (byteOffsetInElements >= (uint)totalBytes)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2105));
 
-        int absoluteOffset = baseOffset + (int)byteOffsetInElements;
-        if (absoluteOffset >= tag.DataSize)
+        // Widen the sum before the bound check — baseOffset is already a
+        // widened-and-narrowed int, but adding byteOffsetInElements (up to
+        // UINT32_MAX) back into int can wrap negative and defeat the bound
+        // check. Mirrors the HandleWriteTagFragmented widening below.
+        long absoluteOffsetLong = (long)baseOffset + byteOffsetInElements;
+        if (absoluteOffsetLong < 0 || absoluteOffsetLong >= tag.DataSize)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2105));
 
+        int absoluteOffset = (int)absoluteOffsetLong;
         int prefixLen = IsStructTag(tag) ? 4 : 2;
         int remaining = Math.Min(totalBytes - (int)byteOffsetInElements, tag.DataSize - absoluteOffset);
         int chunkSize = Math.Min(remaining, MaxReplyData - prefixLen);
