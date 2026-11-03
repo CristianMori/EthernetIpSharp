@@ -42,6 +42,17 @@ public class EipAdapter : IAsyncDisposable
     /// </summary>
     public Func<uint, uint>? ConnectionIdLookup { get; set; }
 
+    /// <summary>
+    /// Fired when a TCP peer disconnects, carrying every O→T connection ID the
+    /// peer successfully Forward_Opened over that socket. Wired by
+    /// <c>VirtualDevice</c> to <c>ConnectionManagerObject.TeardownConnection</c>
+    /// so IoConnections do not survive an abrupt socket close that skipped
+    /// Forward_Close — otherwise a hit-and-run originator leaves live producer
+    /// Threads and WatchdogTimers (the watchdog is held off until the first
+    /// inbound UDP frame, which a dropped peer never sends).
+    /// </summary>
+    public event Action<IReadOnlyList<uint>>? TcpPeerClosed;
+
     /// <summary>Convenience constructor using default SessionManager.</summary>
     public EipAdapter(ICipDispatch dispatch, IdentityInfo identity, ICipDispatch? identitySource = null)
         : this(dispatch, identity, new SessionManager(), identitySource) { }
@@ -69,13 +80,18 @@ public class EipAdapter : IAsyncDisposable
 
     /// <summary>
     /// Wire up per-client state: a byte accumulator (in case messages span
-    /// multiple receives) and the per-session handle for RegisterSession.
+    /// multiple receives), the per-session handle for RegisterSession, and the
+    /// list of O→T connection IDs this peer successfully Forward_Opened — the
+    /// socket-closed handler reaps whatever is still live when the peer drops
+    /// without Forward_Close, so hit-and-run originators cannot leak
+    /// IoConnections through the UDP watchdog's first-frame hold-off.
     /// All session state lives in the closure — no shared mutable state.
     /// </summary>
     private void OnClientConnected(TcpSocketConnection conn)
     {
         var accum = new TcpFrameAccumulator();
         uint sessionHandle = 0;
+        var ownedOtIds = new List<uint>();
 
         conn.BytesReceived += (c, chunk) =>
         {
@@ -86,18 +102,26 @@ public class EipAdapter : IAsyncDisposable
                 if (msg == null) break; // need more bytes
                 accum.Advance(consumed);
 
-                var response = DispatchMessage(msg, ref sessionHandle, c.LocalEndpoint, c.RemoteEndpoint);
+                var response = DispatchMessage(msg, ref sessionHandle, ownedOtIds, c.LocalEndpoint, c.RemoteEndpoint);
                 if (response != null) c.Send(response);
             }
         };
         conn.Closed += c =>
         {
             if (sessionHandle != 0) _sessions.Unregister(sessionHandle);
+            if (ownedOtIds.Count > 0)
+            {
+                // Snapshot before invoking so handlers cannot observe a mutable
+                // backing store, and so a Forward_Close that races with the
+                // close callback cannot wobble indices mid-iteration.
+                var snapshot = ownedOtIds.ToArray();
+                try { TcpPeerClosed?.Invoke(snapshot); } catch { }
+            }
         };
     }
 
     /// <summary>Dispatch a typed encapsulation message to the appropriate handler.</summary>
-    private byte[]? DispatchMessage(IMessage msg, ref uint sessionHandle, IPEndPoint localEp, IPEndPoint remoteEp)
+    private byte[]? DispatchMessage(IMessage msg, ref uint sessionHandle, List<uint> ownedOtIds, IPEndPoint localEp, IPEndPoint remoteEp)
     {
         switch (msg)
         {
@@ -106,7 +130,7 @@ public class EipAdapter : IAsyncDisposable
             case ListServicesMessage ls:     return HandleListServices(ls);
             case RegisterSessionMessage rs:  return HandleRegisterSession(rs, ref sessionHandle);
             case UnregisterSessionMessage us:return HandleUnregisterSession(us, ref sessionHandle);
-            case SendRRDataMessage rr:       return HandleSendRRData(rr, sessionHandle, localEp, remoteEp);
+            case SendRRDataMessage rr:       return HandleSendRRData(rr, sessionHandle, ownedOtIds, localEp, remoteEp);
             case SendUnitDataMessage su:     return HandleSendUnitData(su, sessionHandle);
             case EncapsulationMessage raw:   return BuildErrorResponse(raw.Header.Command, raw.Header.SessionHandle, raw.Header.SenderContext, EncapsulationStatus.InvalidCommand);
             default: return null;
@@ -260,7 +284,7 @@ public class EipAdapter : IAsyncDisposable
         }
     }
 
-    private byte[] HandleSendRRData(SendRRDataMessage msg, uint sessionHandle, IPEndPoint localEp, IPEndPoint remoteEp)
+    private byte[] HandleSendRRData(SendRRDataMessage msg, uint sessionHandle, List<uint> ownedOtIds, IPEndPoint localEp, IPEndPoint remoteEp)
     {
         if (sessionHandle == 0 || !_sessions.IsValid(msg.SessionHandle))
             return BuildErrorResponse(EncapsulationCommand.SendRRData, msg.SessionHandle, msg.SenderContext, EncapsulationStatus.InvalidSessionHandle);
@@ -290,6 +314,17 @@ public class EipAdapter : IAsyncDisposable
             if (isForwardOpen)
             {
                 OnForwardOpenReply(replyItems, serviceCode, data, cipResponse, localEp, remoteEp);
+
+                // Record ownership so the socket-closed handler can reap the
+                // IoConnection if this peer drops before Forward_Close. The
+                // Forward_Open success payload is laid out
+                // OTOT_conn_id(UDINT) + TTOO_conn_id(UDINT) + triad... — see
+                // ConnectionManagerObject.ProcessForwardOpen.
+                if (cipResponse.Data.Length >= 4)
+                {
+                    uint otoTId = BinaryPrimitives.ReadUInt32LittleEndian(cipResponse.Data.Span);
+                    ownedOtIds.Add(otoTId);
+                }
             }
 
             var replyCpfBuf = ArrayPool<byte>.Shared.Rent(4096);

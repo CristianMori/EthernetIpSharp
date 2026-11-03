@@ -308,6 +308,26 @@ public sealed class ConnectionManagerObject
         ConnectionRemoved?.Invoke(connection);
     }
 
+    /// <summary>
+    /// Tear down the connection identified by its O→T connection ID, disposing
+    /// its watchdog and signalling its producer thread to exit. Returns true if
+    /// a live connection was found and torn down, false otherwise.
+    ///
+    /// Wired to the TCP adapter's socket-closed signal so an originator that
+    /// Forward_Opens then drops the TCP connection without Forward_Close
+    /// cannot pin an IoConnection — the UDP watchdog does not arm until the
+    /// first inbound frame (per CIP Vol 1 §3-4.5.2), so a hit-and-run peer
+    /// would otherwise leak producer Threads and WatchdogTimer instances
+    /// indefinitely.
+    /// </summary>
+    public bool TeardownConnection(uint otoTId)
+    {
+        if (!_connections.TryRemove(otoTId, out var conn)) return false;
+        conn.Dispose();
+        ConnectionRemoved?.Invoke(conn);
+        return true;
+    }
+
     /// <summary>Mark a connection as timed out and remove it.</summary>
     public void TimeoutConnection(IoConnection connection)
     {

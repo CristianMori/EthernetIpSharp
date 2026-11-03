@@ -109,6 +109,18 @@ public abstract class VirtualDevice : IAsyncDisposable
             }
         };
 
+        // Reap IoConnections accepted on a TCP peer that drops without a
+        // Forward_Close. The UDP watchdog waits for the first inbound frame
+        // (CIP Vol 1 §3-4.5.2), so a hit-and-run originator would otherwise
+        // pin producer Threads and WatchdogTimers until GC pressure crushes
+        // the host. Teardown is idempotent against a prior clean
+        // Forward_Close — the ot_id is simply gone from the dictionary.
+        _adapter.TcpPeerClosed += ownedOtIds =>
+        {
+            foreach (var otoTId in ownedOtIds)
+                ConnectionManager.TeardownConnection(otoTId);
+        };
+
         _adapter.UdpPort = udpPort;
         await _adapter.ListenAsync(BoundAddress, tcpPort, ct);
 
