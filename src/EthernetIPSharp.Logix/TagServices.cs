@@ -53,7 +53,14 @@ public static class TagServices
         if (bytesToReadLong < 0 || bytesToReadLong > int.MaxValue)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(CipStatus.TooMuchData));
 
-        int byteOffset = elementOffset * tag.ElementSize;
+        // Widen elementOffset * ElementSize the same way — 3dee2e7 caps the
+        // raw ElementId at int.MaxValue, but ElementId=2^30 against an 8-byte
+        // struct ElementSize still wraps the int product negative.
+        long byteOffsetLong = (long)elementOffset * tag.ElementSize;
+        if (byteOffsetLong < 0 || byteOffsetLong > int.MaxValue)
+            return CipServiceResponse.Error(serviceCode, CipStatus.Error(CipStatus.TooMuchData));
+
+        int byteOffset = (int)byteOffsetLong;
         int bytesToRead = (int)bytesToReadLong;
 
         if ((long)byteOffset + bytesToRead > tag.DataSize)
@@ -116,7 +123,12 @@ public static class TagServices
         if (bytesToWriteLong < 0 || bytesToWriteLong > int.MaxValue)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(CipStatus.TooMuchData));
 
-        int byteOffset = elementOffset * tag.ElementSize;
+        // Widen elementOffset * ElementSize the same way — see HandleReadTag.
+        long byteOffsetLong = (long)elementOffset * tag.ElementSize;
+        if (byteOffsetLong < 0 || byteOffsetLong > int.MaxValue)
+            return CipServiceResponse.Error(serviceCode, CipStatus.Error(CipStatus.TooMuchData));
+
+        int byteOffset = (int)byteOffsetLong;
         int bytesToWrite = (int)bytesToWriteLong;
 
         // pycomm3 (and Studio 5000 on Identity attribute 7) write SHORT_STRING
@@ -179,7 +191,12 @@ public static class TagServices
         if (totalBytesLong < 0 || totalBytesLong > int.MaxValue)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(CipStatus.TooMuchData));
 
-        int baseOffset = elementOffset * tag.ElementSize;
+        // Widen elementOffset * ElementSize the same way — see HandleReadTag.
+        long baseOffsetLong = (long)elementOffset * tag.ElementSize;
+        if (baseOffsetLong < 0 || baseOffsetLong > int.MaxValue)
+            return CipServiceResponse.Error(serviceCode, CipStatus.Error(CipStatus.TooMuchData));
+
+        int baseOffset = (int)baseOffsetLong;
         int totalBytes = (int)totalBytesLong;
         if (byteOffsetInElements >= (uint)totalBytes)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2105));
@@ -251,7 +268,12 @@ public static class TagServices
         if (totalBytesLong < 0 || totalBytesLong > int.MaxValue)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(CipStatus.TooMuchData));
 
-        int baseOffset = elementOffset * tag.ElementSize;
+        // Widen elementOffset * ElementSize the same way — see HandleReadTag.
+        long baseOffsetLong = (long)elementOffset * tag.ElementSize;
+        if (baseOffsetLong < 0 || baseOffsetLong > int.MaxValue)
+            return CipServiceResponse.Error(serviceCode, CipStatus.Error(CipStatus.TooMuchData));
+
+        int baseOffset = (int)baseOffsetLong;
         long totalBytes = totalBytesLong;
         int writeLen = data.Length - headerLen;
         if ((long)byteOffsetInElements + writeLen > totalBytes)
