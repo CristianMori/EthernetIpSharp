@@ -133,11 +133,20 @@ public sealed class SafetyScannerConnection : IAsyncDisposable
     private bool _consumerActive;
     private ushort _timestamp;
     // Our producer's rollover (used by Encode on server O->T). Seeded from
-    // serverConfig.InitialRolloverValue at Open, incremented in ProduceServerData
-    // every time _timestamp wraps 0xFFFF -> 0x0000. Extended-format CRC-S5
+    // serverConfig.InitialRolloverValue at Open, recomputed in ProduceServerData
+    // from the Stopwatch-derived rawTicks every frame. Extended-format CRC-S5
     // folds this into the seed, so any spec-compliant consumer would drift
     // out of sync after the first ~8.4 s if this counter stayed at 0.
     private ushort _rolloverCount;
+    // Seeds for the Stopwatch-based timestamp/rollover derivation (mirrors
+    // SafetyDevice.ProduceIoData — one truth across both ends). Set at Open
+    // from the InitialTimestamp / InitialRolloverValue we advertised in the
+    // safety segment; the wall clock starts from _productionStartTicks, which
+    // is latched the moment the consumer becomes active so the first non-zero
+    // producer frame carries exactly our advertised InitialTimestamp.
+    private ushort _initialTimestamp;
+    private ushort _initialRolloverValue;
+    private long _productionStartTicks;
     // Target's producer rollover (used by Decode on client T<-O). Advanced
     // here on every observed wire-timestamp wrap. Must be kept distinct from
     // _rolloverCount — they wrap on independent schedules.
@@ -206,6 +215,8 @@ public sealed class SafetyScannerConnection : IAsyncDisposable
         // agree from frame 1.
         conn._timestamp = serverConfig.InitialTimestamp;
         conn._rolloverCount = serverConfig.InitialRolloverValue;
+        conn._initialTimestamp = serverConfig.InitialTimestamp;
+        conn._initialRolloverValue = serverConfig.InitialRolloverValue;
 
         // Generate unique connection serials
         conn._serverConnSerial = (ushort)(Environment.TickCount & 0xFFFF);
@@ -396,24 +407,31 @@ public sealed class SafetyScannerConnection : IAsyncDisposable
         try
         {
             bool runIdle = _consumerActive && _runIdle;
-            // Snapshot both counters BEFORE advancing them. The frame we're
-            // about to encode carries the OLD timestamp with the OLD rollover;
-            // the consumer detects the wrap from the *next* frame's timestamp
-            // jump and bumps its own rollover to match. Reading rollover after
-            // the bump would emit (old_ts, new_rollover) on the wrap frame,
-            // which CRCs with the wrong seed and shows up as one failed frame
-            // per wrap boundary.
-            ushort timestamp = _consumerActive ? _timestamp : (ushort)0;
-            ushort rollover = _rolloverCount;
-            var mode = ModeByte.Create(runIdle, _pingCount);
-
+            // Derive (timestamp, rollover) from the Stopwatch — mirrors the
+            // target-side producer in SafetyDevice.ProduceIoData. The two
+            // move together atomically because they both come from the same
+            // rawTicks, so the wrap frame emits (new_ts, new_rollover) in a
+            // single step and the consumer's CRC-S5 seed stays aligned.
+            // The old scheme hard-coded a 50 ms step (50000 / 128 ≈ 390
+            // ticks per frame) that was only correct at a 50 ms RPI — any
+            // other negotiated RPI drifted the wire clock.
+            ushort timestamp;
             if (_consumerActive)
             {
-                ushort prevTs = _timestamp;
-                _timestamp += (ushort)(50000 / 128); // approximate RPI in 128µs ticks
-                if (_timestamp < prevTs)
-                    _rolloverCount = (ushort)(_rolloverCount + 1);
+                long nowTicks = Stopwatch.GetTimestamp();
+                long elapsedUs = (nowTicks - _productionStartTicks)
+                    * 1_000_000 / Stopwatch.Frequency;
+                long rawTicks = _initialTimestamp + elapsedUs / 128;
+                timestamp = (ushort)(rawTicks & 0xFFFF);
+                _timestamp = timestamp;
+                _rolloverCount = (ushort)(_initialRolloverValue + (rawTicks >> 16));
             }
+            else
+            {
+                timestamp = 0;
+            }
+            ushort rollover = _rolloverCount;
+            var mode = ModeByte.Create(runIdle, _pingCount);
 
             var buf = new byte[_outputData.Length * 2 + 16];
             int len = SafetyFrameCodec.Encode(buf, _outputData, _format, mode, timestamp,
@@ -457,6 +475,12 @@ public sealed class SafetyScannerConnection : IAsyncDisposable
     {
         if (!_consumerActive)
         {
+            // Latch the Stopwatch anchor BEFORE flipping _consumerActive —
+            // ProduceServerData reads _productionStartTicks the moment it
+            // sees the flag flip, and the first consumer-active frame must
+            // measure elapsed from this instant so its wire timestamp lands
+            // on our advertised InitialTimestamp.
+            _productionStartTicks = Stopwatch.GetTimestamp();
             _consumerActive = true;
             _runIdle = true;
             LogMsg($"Consumer active! Transitioning to run=1. TCOO: [{data.Span.ToArray().Select(b => b.ToString("X2")).Aggregate((a,b) => a + " " + b)}]");
