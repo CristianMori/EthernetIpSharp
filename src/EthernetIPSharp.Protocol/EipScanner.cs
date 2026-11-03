@@ -506,8 +506,19 @@ public sealed class EipScanner : IAsyncDisposable
     /// <summary>Dispose: close UDP transport and disconnect.</summary>
     public async ValueTask DisposeAsync()
     {
-        if (_udp != null) await _udp.DisposeAsync();
-        await DisconnectAsync();
-        _sendLock.Dispose();
+        // Release _sendLock in finally — a throw out of UDP or TCP teardown
+        // used to skip Dispose and leak the SemaphoreSlim's wait handle.
+        try
+        {
+            if (_udp != null)
+            {
+                try { await _udp.DisposeAsync(); } catch { /* keep disconnecting */ }
+            }
+            await DisconnectAsync();
+        }
+        finally
+        {
+            _sendLock.Dispose();
+        }
     }
 }
