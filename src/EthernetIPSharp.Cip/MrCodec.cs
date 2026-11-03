@@ -18,26 +18,25 @@ public static class MrCodec
         out byte serviceCode, out CipPath path, out ReadOnlyMemory<byte> data)
     {
         var span = mrData.Span;
-        if (span.Length < 2)
-        {
-            serviceCode = 0;
-            path = default;
-            data = ReadOnlyMemory<byte>.Empty;
-            return false;
-        }
+        // Expose the service code to the caller as soon as it is available,
+        // even when the rest of the request is malformed, so the caller can
+        // build a CIP reply (reply_service = service | 0x80) with the right
+        // reply bit instead of falling back to an encapsulation-level error.
+        serviceCode = span.Length >= 1 ? span[0] : (byte)0;
+        path = default;
+        data = ReadOnlyMemory<byte>.Empty;
 
-        serviceCode = span[0];
+        if (span.Length < 2)
+            return false;
+
         byte pathSizeWords = span[1];
         int pathSizeBytes = pathSizeWords * 2;
 
         if (span.Length < 2 + pathSizeBytes)
-        {
-            path = default;
-            data = ReadOnlyMemory<byte>.Empty;
             return false;
-        }
 
-        (path, _) = CipPath.Parse(span.Slice(2, pathSizeBytes));
+        if (!CipPath.TryParse(span.Slice(2, pathSizeBytes), out path, out _))
+            return false;
 
         data = mrData.Length > 2 + pathSizeBytes
             ? mrData.Slice(2 + pathSizeBytes)

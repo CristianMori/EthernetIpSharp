@@ -94,8 +94,33 @@ public readonly struct CipPath
     private const byte LogicalFormat16Bit = 0x01;
     private const byte LogicalFormat32Bit = 0x02;
 
-    /// <summary>Parse an EPATH from a byte span. Returns the path and number of bytes consumed.</summary>
+    /// <summary>
+    /// Parse an EPATH from a byte span. Returns the path and number of bytes consumed.
+    /// Throws <see cref="ArgumentException"/> on a truncated path.
+    /// </summary>
+    /// <remarks>
+    /// Prefer <see cref="TryParse(ReadOnlySpan{byte}, out CipPath, out int)"/> on the
+    /// request path — a header like <c>{pathSize=1, body=[0x91, 0xFF]}</c> declares a
+    /// 255-char symbolic segment inside 0 remaining bytes, which used to raise
+    /// <see cref="ArgumentOutOfRangeException"/> out of here. That exception unwound
+    /// through Dispatch into TcpSocketConnection.ReadLoop and was swallowed with no
+    /// CIP reply, stalling the client.
+    /// </remarks>
     public static (CipPath Path, int BytesConsumed) Parse(ReadOnlySpan<byte> data)
+    {
+        if (!TryParse(data, out var path, out int consumed))
+            throw new ArgumentException("Truncated CIP EPATH");
+        return (path, consumed);
+    }
+
+    /// <summary>
+    /// Non-throwing variant used by the dispatcher. Bounds-checks every segment
+    /// advance against <paramref name="data"/>; returns <c>false</c> when a
+    /// declared length (symbolic char count, logical format width) runs past
+    /// the end of the buffer. The caller is expected to reply with CIP 0x04
+    /// Path Segment Error in that case.
+    /// </summary>
+    public static bool TryParse(ReadOnlySpan<byte> data, out CipPath path, out int bytesConsumed)
     {
         uint? classId = null;
         uint? instanceId = null;
@@ -113,11 +138,17 @@ public readonly struct CipPath
             // ANSI Extended Symbolic Segment (0x91)
             if (segByte == SymbolicSegmentByte)
             {
-                offset++;
-                byte charCount = data[offset++];
-                var name = Encoding.ASCII.GetString(data.Slice(offset, charCount));
-                offset += charCount;
-                if (charCount % 2 != 0) offset++; // pad to word boundary
+                // Need: segByte(1) + charCount(1) + name(charCount) + optional pad(1)
+                if (offset + 2 > data.Length) { path = default; bytesConsumed = 0; return false; }
+                byte charCount = data[offset + 1];
+                int nameStart = offset + 2;
+                int nameEnd = nameStart + charCount;
+                if (nameEnd > data.Length) { path = default; bytesConsumed = 0; return false; }
+                int padEnd = (charCount % 2 != 0) ? nameEnd + 1 : nameEnd;
+                if (padEnd > data.Length) { path = default; bytesConsumed = 0; return false; }
+
+                var name = Encoding.ASCII.GetString(data.Slice(nameStart, charCount));
+                offset = padEnd;
 
                 if (symbolicName == null)
                     symbolicName = new StringBuilder(name);
@@ -135,28 +166,33 @@ public readonly struct CipPath
             {
                 byte logicalType = (byte)(segByte & LogicalTypeMask);
                 byte format = (byte)(segByte & LogicalFormatMask);
-                offset++;
+                int cursor = offset + 1;
 
                 uint value;
                 switch (format)
                 {
                     case LogicalFormat8Bit:
-                        value = data[offset];
-                        offset += 1;
+                        if (cursor + 1 > data.Length) { path = default; bytesConsumed = 0; return false; }
+                        value = data[cursor];
+                        cursor += 1;
                         break;
                     case LogicalFormat16Bit:
-                        if (offset % 2 != 0) offset++;
-                        value = BinaryPrimitives.ReadUInt16LittleEndian(data.Slice(offset));
-                        offset += 2;
+                        if (cursor % 2 != 0) cursor++;
+                        if (cursor + 2 > data.Length) { path = default; bytesConsumed = 0; return false; }
+                        value = BinaryPrimitives.ReadUInt16LittleEndian(data.Slice(cursor));
+                        cursor += 2;
                         break;
                     case LogicalFormat32Bit:
-                        if (offset % 2 != 0) offset++;
-                        value = BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(offset));
-                        offset += 4;
+                        if (cursor % 2 != 0) cursor++;
+                        if (cursor + 4 > data.Length) { path = default; bytesConsumed = 0; return false; }
+                        value = BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(cursor));
+                        cursor += 4;
                         break;
                     default:
                         goto done;
                 }
+
+                offset = cursor;
 
                 switch (logicalType)
                 {
@@ -189,7 +225,7 @@ public readonly struct CipPath
         }
 
         done:
-        return (new CipPath
+        path = new CipPath
         {
             ClassId = classId,
             InstanceId = instanceId,
@@ -199,7 +235,9 @@ public readonly struct CipPath
             SymbolicName = symbolicName?.ToString(),
             Segments = segments,
             RawPath = data.Slice(0, offset).ToArray(),
-        }, offset);
+        };
+        bytesConsumed = offset;
+        return true;
     }
 
     /// <summary>Encode an 8-bit logical segment.</summary>

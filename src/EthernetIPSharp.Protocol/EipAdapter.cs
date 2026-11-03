@@ -241,10 +241,25 @@ public class EipAdapter : IAsyncDisposable
         ushort seqCount = BinaryPrimitives.ReadUInt16LittleEndian(msg.CipData.Span);
         var mrIn = msg.CipData[2..];
 
-        if (!MrCodec.TryParseRequest(mrIn, out var serviceCode, out var path, out var data))
+        CipServiceResponse cipResponse;
+        if (MrCodec.TryParseRequest(mrIn, out var serviceCode, out var path, out var data))
+        {
+            cipResponse = _dispatch.Dispatch(serviceCode, path, data);
+        }
+        else if (mrIn.Length >= 1)
+        {
+            // Truncated path (e.g. {pathSize=1, body=[0x91, 0xFF]} declaring a
+            // 255-char symbolic in zero remaining bytes) used to raise
+            // ArgumentOutOfRangeException inside CipPath.Parse, which unwound
+            // through Dispatch into TcpSocketConnection.ReadLoop and was
+            // swallowed with no CIP reply, stalling the client. Reply with
+            // CIP 0x04 PathSegmentError using the service code we did get.
+            cipResponse = CipServiceResponse.Error(serviceCode, CipStatus.Error(CipStatus.PathSegmentError));
+        }
+        else
+        {
             return BuildErrorResponse(EncapsulationCommand.SendUnitData, msg.SessionHandle, msg.SenderContext, EncapsulationStatus.IncorrectData);
-
-        var cipResponse = _dispatch.Dispatch(serviceCode, path, data);
+        }
 
         var mrBuf = ArrayPool<byte>.Shared.Rent(4096);
         try
@@ -290,10 +305,28 @@ public class EipAdapter : IAsyncDisposable
             return BuildErrorResponse(EncapsulationCommand.SendRRData, msg.SessionHandle, msg.SenderContext, EncapsulationStatus.InvalidSessionHandle);
 
         // Parse MR request and dispatch
-        if (!MrCodec.TryParseRequest(msg.CipData, out var serviceCode, out var path, out var data))
+        CipServiceResponse cipResponse;
+        byte serviceCode;
+        CipPath path;
+        ReadOnlyMemory<byte> data;
+        if (MrCodec.TryParseRequest(msg.CipData, out serviceCode, out path, out data))
+        {
+            cipResponse = _dispatch.Dispatch(serviceCode, path, data);
+        }
+        else if (msg.CipData.Length >= 1)
+        {
+            // Truncated path (e.g. {pathSize=1, body=[0x91, 0xFF]} declaring a
+            // 255-char symbolic in zero remaining bytes) used to raise
+            // ArgumentOutOfRangeException inside CipPath.Parse, which unwound
+            // through Dispatch into TcpSocketConnection.ReadLoop and was
+            // swallowed with no CIP reply, stalling the client. Reply with
+            // CIP 0x04 PathSegmentError using the service code we did get.
+            cipResponse = CipServiceResponse.Error(serviceCode, CipStatus.Error(CipStatus.PathSegmentError));
+        }
+        else
+        {
             return BuildErrorResponse(EncapsulationCommand.SendRRData, msg.SessionHandle, msg.SenderContext, EncapsulationStatus.IncorrectData);
-
-        var cipResponse = _dispatch.Dispatch(serviceCode, path, data);
+        }
 
         // Encode MR response using pooled buffer
         var mrResponseBuf = ArrayPool<byte>.Shared.Rent(4096);

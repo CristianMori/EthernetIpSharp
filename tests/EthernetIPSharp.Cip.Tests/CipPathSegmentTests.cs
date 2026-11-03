@@ -143,4 +143,42 @@ public class CipPathSegmentTests
         Assert.Equal(6u, path.ClassId);
         Assert.Equal(1u, path.InstanceId);
     }
+
+    // Truncated symbolic header: {0x91, 0xFF} declares a 255-char ANSI Extended
+    // Symbolic segment inside 0 remaining bytes. CipPath.Parse used to raise
+    // ArgumentOutOfRangeException out of the raw-indexer path, which unwound
+    // through MrCodec.TryParseRequest and Dispatch into TcpSocketConnection
+    // .ReadLoop where it was swallowed with no CIP reply, stalling the client.
+    // TryParse must now return false without throwing, and MrCodec must still
+    // surface the service code so the dispatcher can reply with CIP 0x04
+    // PathSegmentError.
+    [Fact]
+    public void TryParse_TruncatedSymbolicHeader_ReturnsFalseWithoutThrowing()
+    {
+        var bytes = new byte[] { 0x91, 0xFF };
+
+        bool ok = CipPath.TryParse(bytes, out _, out _);
+
+        Assert.False(ok);
+    }
+
+    [Fact]
+    public void Parse_TruncatedSymbolicHeader_ThrowsArgumentException()
+    {
+        var bytes = new byte[] { 0x91, 0xFF };
+
+        Assert.Throws<ArgumentException>(() => CipPath.Parse(bytes));
+    }
+
+    [Fact]
+    public void TryParseRequest_TruncatedSymbolicPath_ReturnsFalseButSurfacesServiceCode()
+    {
+        // service=0x4C (Read_Tag), pathSize=1 word (2 bytes), path body=[0x91, 0xFF]
+        var mr = new byte[] { 0x4C, 0x01, 0x91, 0xFF };
+
+        bool ok = MrCodec.TryParseRequest(mr, out byte serviceCode, out _, out _);
+
+        Assert.False(ok);
+        Assert.Equal(0x4C, serviceCode);
+    }
 }
