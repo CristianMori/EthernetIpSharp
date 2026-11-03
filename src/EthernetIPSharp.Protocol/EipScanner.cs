@@ -199,6 +199,13 @@ public sealed class EipScanner : IAsyncDisposable
 
         // Parse response: OT conn ID (4) + TO conn ID (4) + ...
         var respData = response.Data.ToArray();
+        // A hostile / malformed target that replies with fewer than 8
+        // payload bytes would otherwise trip ArgumentOutOfRangeException
+        // deep inside BinaryPrimitives.ReadUInt32LittleEndian — surface it
+        // as a protocol-shaped exception from this public entry point.
+        if (respData.Length < 8)
+            throw new InvalidOperationException(
+                "Target returned truncated Forward_Open reply: " + respData.Length + " bytes");
         uint respOtConnId = BinaryPrimitives.ReadUInt32LittleEndian(respData);
         uint respToConnId = BinaryPrimitives.ReadUInt32LittleEndian(respData.AsSpan(4));
 

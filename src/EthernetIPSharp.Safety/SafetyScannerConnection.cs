@@ -264,6 +264,12 @@ public sealed class SafetyScannerConnection : IAsyncDisposable
 
         // Parse server response
         var srd = serverResp.Data.ToArray();
+        // Guard the two UINT32 reads below — a hostile target that replies
+        // with fewer than 8 payload bytes would otherwise throw
+        // ArgumentOutOfRangeException out of this public async entry point.
+        if (srd.Length < 8)
+            throw new SafetyProtocolException(
+                $"Server Forward_Open reply truncated: {srd.Length}B, need >= 8");
         conn._serverOtoTId = BinaryPrimitives.ReadUInt32LittleEndian(srd);
         conn._serverTtoOId = BinaryPrimitives.ReadUInt32LittleEndian(srd.AsSpan(4));
         byte appReplySize = srd[24];
@@ -328,6 +334,9 @@ public sealed class SafetyScannerConnection : IAsyncDisposable
         }
 
         var crdArr = clientResp.Data.ToArray();
+        if (crdArr.Length < 8)
+            throw new SafetyProtocolException(
+                $"Client Forward_Open reply truncated: {crdArr.Length}B, need >= 8");
         conn._clientOtoTId = BinaryPrimitives.ReadUInt32LittleEndian(crdArr);
         conn._clientTtoOId = BinaryPrimitives.ReadUInt32LittleEndian(crdArr.AsSpan(4));
 
