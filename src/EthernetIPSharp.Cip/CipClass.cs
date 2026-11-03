@@ -107,6 +107,20 @@ public class CipClass
         instanceId == 0 ? ClassInstance :
         _instances.TryGetValue(instanceId, out var inst) ? inst : null;
 
+    /// <summary>
+    /// Remove the instance with the given ID. Instance 0 (the class instance)
+    /// cannot be removed. The <c>_maxInstanceId</c> is left untouched because
+    /// CIP's "max instance" attribute reports the highest ever assigned, not
+    /// the current occupancy — rewinding it would let a subsequent allocator
+    /// hand out an ID a stale cache still thinks is live.
+    /// </summary>
+    /// <returns><c>true</c> if the instance existed and was removed.</returns>
+    public bool RemoveInstance(uint instanceId)
+    {
+        if (instanceId == 0) return false;
+        return _instances.Remove(instanceId);
+    }
+
     /// <summary>All instances of this class (excludes instance 0).</summary>
     public IReadOnlyDictionary<uint, CipInstance> Instances => _instances;
 

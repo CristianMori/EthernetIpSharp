@@ -629,6 +629,15 @@ public sealed class SafetyDevice : VirtualDevice, ISafetyConnectionHandler
     {
         if (!conn.IsSafety) return;
 
+        // Reap the per-connection Safety Validator instance so the CipClass
+        // registration doesn't leak across FwdOpen/FwdClose cycles — see
+        // SafetyValidatorObject.RemoveInstance.
+        if (conn.SafetyValidatorInstanceId != 0)
+        {
+            _validator.RemoveInstance(conn.SafetyValidatorInstanceId);
+            conn.SafetyValidatorInstanceId = 0;
+        }
+
         bool anySafetyLeft = false;
         foreach (var other in ConnectionManager.ActiveConnections)
         {

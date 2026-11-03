@@ -137,6 +137,34 @@ public class SafetyConnectionTests
     }
 
     [Fact]
+    public void SafetyValidator_OpenCloseCycles_ReturnToBaseline()
+    {
+        // Regression: SafetyValidatorObject.RemoveInstance used to be a no-op
+        // ("for a simulator we can leave the instance"). A production
+        // SafetyDevice therefore leaked a CipInstance per FwdOpen/FwdClose
+        // cycle, and _nextInstanceId wrapped through 0 after 2^32 cycles so
+        // the next allocation collided with a surviving ID.
+        var validator = new SafetyValidatorObject();
+        int baseline = validator.InstanceCount;
+        Assert.Equal(0, baseline);
+
+        var ids = new uint[10];
+        for (int i = 0; i < 10; i++)
+        {
+            var conn = new IoConnection { IsSafety = true };
+            var vi = validator.CreateInstance(conn);
+            ids[i] = vi.InstanceId;
+        }
+        Assert.Equal(baseline + 10, validator.InstanceCount);
+
+        for (int i = 0; i < 10; i++)
+            Assert.True(validator.RemoveInstance(ids[i]));
+
+        Assert.Equal(baseline, validator.InstanceCount);
+        Assert.False(validator.RemoveInstance(ids[0]));
+    }
+
+    [Fact]
     public void ValidateSafetyOpen_TruncatedSegment_ReturnsCipError()
     {
         // Regression: a FwdOpen whose safety segment advertises

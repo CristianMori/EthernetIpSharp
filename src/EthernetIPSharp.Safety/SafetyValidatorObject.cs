@@ -54,12 +54,22 @@ public sealed class SafetyValidatorObject
         return validator;
     }
 
-    /// <summary>Remove a validator instance when a safety connection closes.</summary>
-    public void RemoveInstance(uint instanceId)
+    /// <summary>
+    /// Remove a validator instance when a safety connection closes. Without
+    /// this a production SafetyDevice leaked a CipInstance per FwdOpen/
+    /// FwdClose cycle; _nextInstanceId also eventually wrapped through 0
+    /// after 2^32 cycles and the next allocation collided with a surviving
+    /// ID. The CipClass instance registration goes with it so a stray CIP
+    /// request after close no longer resolves to a dead validator.
+    /// </summary>
+    /// <returns><c>true</c> if the instance existed and was removed.</returns>
+    public bool RemoveInstance(uint instanceId)
     {
-        // CipClass doesn't have a RemoveInstance method, but for a simulator
-        // we can leave the instance — it just won't be referenced.
+        return _cipClass.RemoveInstance(instanceId);
     }
+
+    /// <summary>Current number of live validator instances. Used by tests.</summary>
+    public int InstanceCount => _cipClass.Instances.Count;
 }
 
 /// <summary>State of a Safety Validator instance.</summary>
