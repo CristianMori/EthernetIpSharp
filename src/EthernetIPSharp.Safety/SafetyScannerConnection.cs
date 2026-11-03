@@ -619,6 +619,13 @@ public sealed class SafetyScannerConnection : IAsyncDisposable
     {
         IsOpen = false;
         _productionCts?.Cancel();
+        // Join the production thread BEFORE unhooking the UDP transport and
+        // sending Forward Close. Previously we only Cancel()'d the CTS and
+        // moved on; the production thread could still be mid-iteration on a
+        // handle the surrounding dispose was about to invalidate, which
+        // surfaced as spurious send errors on a cleanly closed connection.
+        _productionThread?.Join(500);
+        _productionThread = null;
         _productionCts = null;
         _udp.MessageReceived -= OnUdpMessageReceived;
 

@@ -1,8 +1,25 @@
+using System.Net;
 using System.Reflection;
+using EthernetIPSharp.Protocol;
+using EthernetIPSharp.Protocol.Messages;
 using EthernetIPSharp.Safety;
 using Xunit;
 
 namespace EthernetIPSharp.Safety.Tests;
+
+/// <summary>
+/// Minimal UDP transport stub for CloseAsync / field-access tests. It
+/// records nothing and sends nothing — real I/O is not exercised.
+/// </summary>
+file sealed class StubUdpTransport : IEipUdpTransport
+{
+    public event Action<IMessage>? MessageReceived { add { } remove { } }
+    public Task StartAsync(CancellationToken ct) => Task.CompletedTask;
+    public void Send(ISerializableMessage message) { }
+    public void SendIoData(IPEndPoint destination, uint connectionId, uint encapSeqNum,
+        ReadOnlySpan<byte> data) { }
+    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+}
 
 /// <summary>
 /// Regression tests for the cross-thread field access scheme in
@@ -20,7 +37,8 @@ public class SafetyScannerConcurrencyTests
     /// and the private <c>_outputData</c> field — no actual Forward Open or
     /// UDP I/O runs — so the null transport and scanner are not accessed.
     /// </summary>
-    private static SafetyScannerConnection NewForFieldAccess(int outputSize)
+    private static SafetyScannerConnection NewForFieldAccess(int outputSize,
+        IEipUdpTransport? udp = null)
     {
         var ctor = typeof(SafetyScannerConnection).GetConstructor(
             BindingFlags.NonPublic | BindingFlags.Instance,
@@ -28,14 +46,14 @@ public class SafetyScannerConcurrencyTests
             types: new[]
             {
                 typeof(EthernetIPSharp.Protocol.EipScanner),
-                typeof(EthernetIPSharp.Protocol.IEipUdpTransport),
+                typeof(IEipUdpTransport),
                 typeof(SafetyFormat),
             },
             modifiers: null);
         Assert.NotNull(ctor);
 
         var conn = (SafetyScannerConnection)ctor!.Invoke(
-            new object?[] { null, null, SafetyFormat.Base });
+            new object?[] { null, udp, SafetyFormat.Base });
 
         // Seed the backing buffer so SetOutputData's copy-on-swap sees a
         // fixed-length target to copy into.
@@ -44,6 +62,14 @@ public class SafetyScannerConcurrencyTests
         Assert.NotNull(fld);
         fld!.SetValue(conn, new byte[outputSize]);
         return conn;
+    }
+
+    private static void SetPrivate(SafetyScannerConnection conn, string name, object? value)
+    {
+        var fld = typeof(SafetyScannerConnection).GetField(
+            name, BindingFlags.NonPublic | BindingFlags.Instance);
+        Assert.NotNull(fld);
+        fld!.SetValue(conn, value);
     }
 
     private static byte[] ReadOutputData(SafetyScannerConnection conn)
@@ -110,6 +136,44 @@ public class SafetyScannerConcurrencyTests
         reader.Join(2000);
 
         if (firstFailure != null) throw firstFailure;
+    }
+
+    [Fact]
+    public async Task CloseAsync_JoinsProductionThreadCleanly()
+    {
+        // Spin a stand-in production thread, hand its handle to the
+        // connection via reflection, then call CloseAsync in a loop.
+        // Before the Join fix CloseAsync returned while the thread was
+        // still iterating; now the thread MUST have exited by the time
+        // CloseAsync returns (modulo the 500 ms Join budget).
+        for (int iter = 0; iter < 10; iter++)
+        {
+            var conn = NewForFieldAccess(outputSize: 8, udp: new StubUdpTransport());
+            var cts = new CancellationTokenSource();
+            var started = new ManualResetEventSlim(false);
+            var thread = new Thread(() =>
+            {
+                started.Set();
+                while (!cts.Token.IsCancellationRequested)
+                    Thread.SpinWait(50);
+            })
+            { IsBackground = true, Name = "StubProduction" };
+
+            SetPrivate(conn, "_productionCts", cts);
+            SetPrivate(conn, "_productionThread", thread);
+            SetPrivate(conn, "_isOpen", true);
+
+            thread.Start();
+            Assert.True(started.Wait(1000));
+
+            await conn.CloseAsync();
+
+            // Thread must have exited by the time CloseAsync returned. If
+            // CloseAsync skipped the Join, the thread could still be alive
+            // here.
+            Assert.False(thread.IsAlive,
+                $"Production thread still alive after CloseAsync (iteration {iter})");
+        }
     }
 
     [Fact]
