@@ -313,10 +313,22 @@ public sealed class ConnectionManagerObject
     /// <summary>
     /// Handle Unconnected Send (0x52) — unwrap the embedded CIP request and dispatch it.
     /// Format: priority(1) + timeout(1) + msg_length(UINT) + embedded_MR_request + [pad] + route_path_size(1) + reserved(1) + route_path
+    ///
+    /// Nested recursion is capped through <see cref="CipDispatchDepth"/>. An
+    /// inner MR whose service is also 0x52 and whose path targets Class 0x06
+    /// Instance 1 would otherwise re-enter this handler with no bound; a
+    /// chain nested a few thousand deep in a 65 KiB payload raises
+    /// <see cref="StackOverflowException"/>, which .NET cannot catch, and
+    /// tears down the host process. The counter is shared with
+    /// EthernetIPSharp.Logix.MultiServiceHandler so a mixed
+    /// 0x52 ⇒ 0x0A ⇒ 0x52 ⇒ 0x0A chain cannot defeat the cap either.
     /// </summary>
     private CipServiceResponse HandleUnconnectedSend(CipInstance instance, CipServiceRequest request)
     {
         if (DispatchRequest == null)
+            return CipServiceResponse.Error(request.ServiceCode, CipStatus.Error(CipStatus.ServiceNotSupported));
+
+        if (CipDispatchDepth.AtLimit)
             return CipServiceResponse.Error(request.ServiceCode, CipStatus.Error(CipStatus.ServiceNotSupported));
 
         if (request.Data.Length < 4)
@@ -337,8 +349,16 @@ public sealed class ConnectionManagerObject
         if (!MrCodec.TryParseRequest(embeddedRequest, out var serviceCode, out var path, out var data))
             return CipServiceResponse.Error(request.ServiceCode, CipStatus.Error(CipStatus.PathSegmentError));
 
-        // Dispatch the inner request through the full CIP dispatch chain
-        return DispatchRequest(serviceCode, path, data);
+        CipDispatchDepth.Enter();
+        try
+        {
+            // Dispatch the inner request through the full CIP dispatch chain
+            return DispatchRequest(serviceCode, path, data);
+        }
+        finally
+        {
+            CipDispatchDepth.Exit();
+        }
     }
 
     /// <summary>Build a Forward Open error response with general status 0x01 and the given extended status.</summary>
