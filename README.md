@@ -56,6 +56,7 @@ Adapter, scanner, CIP Safety, structures, and the tag server are in [Quick start
 - [Library reference](#library-reference)
 - [CIP services supported](#cip-services-supported)
 - [CIP Safety details](#cip-safety-details)
+- [Security hardening](#security-hardening)
 - [Known limitations](#known-limitations)
 - [Related projects](#related-projects)
 - [License](#license)
@@ -610,6 +611,24 @@ Then verify `Get-NetAdapter -Name Ethernet` shows `LinkSpeed: 1 Gbps` and `FullD
 **2. Windows scheduler tail.** With `ThreadPriority.Highest`, CPU pinning, `GCLatencyMode.SustainedLowLatency`, and a high-resolution waitable timer, the producer thread's worst wakeup overshoot on stock Windows is **~10 ms** (median ~400 µs). This is the floor on stock Windows due to DPC processing, CPU C-state exit, and System Management Mode. For tighter tolerances, look into MMCSS Pro Audio (`AvSetMmThreadCharacteristics`) or BIOS C-state disable.
 
 Set `ETHERNETIPSHARP_LAG_CSV=1` before launching the adapter to write per-iteration producer-thread timing (`iter_us, wake_overshoot_us, produce_us, total_us`) to `%TEMP%\lag_conn_*.csv` for post-run analysis.
+
+## Security hardening
+
+Six rounds of static-review hardening have been applied to the stack, landing as 23 commits. The full suite — 312 tests across the Cip, Logix, Safety, and Protocol test projects — passes against the hardened code.
+
+The passes cover both server-side (adapter / target) and client-side (scanner) paths. Specific areas touched:
+
+- **CIP path parsing** — `CipPath.TryParse` tightened against malformed EPATHs (truncated segments, out-of-range word counts, overlapping Logical/Symbolic fields).
+- **Logix tag services** — `int → long` widening on every tag-service handler, including the walker-aware fragmented path, so offset + length arithmetic can't wrap on large structures.
+- **Template Object** — bounds-checked template-member walk; refuses responses with inconsistent member-count / size fields instead of over-reading.
+- **EipAdapter frame accumulator** — hard cap on the per-connection TCP accumulator so a stuck or hostile peer can't force unbounded growth.
+- **Forward_Open parsing** — `ForwardOpenRequest.TryParse` validates path lengths and segment opcodes before dereferencing.
+- **Unconnected_Send + Multiple_Service_Packet** — shared `CipDispatchDepth` recursion counter prevents nested-wrapper denial-of-service; MSP response-size cap on the server side.
+- **I/O connection reaping** — `IoConnection` now reaps cleanly on the new `TcpPeerClosed` event when the originator's TCP session drops without a Forward_Close.
+- **EipScanner response-size guards** — client-side caps on reply bodies before allocation / copy.
+- **CIP Safety** — `SafetyNetworkSegment.TryParse` with full field validation; scanner-side memory-barrier pairing using `Volatile.Write` / `Volatile.Read` on cross-thread fields; `SafetyValidator` instance reap on close; production thread `Join` on connection close so threads don't outlive their state.
+
+Framing: this isn't "secure" — industrial CIP has no authentication, so real deployments still need network segmentation. What the hardening pass closes are specific attack and correctness gaps surfaced by six rounds of static review.
 
 ## Known limitations
 
