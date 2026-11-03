@@ -75,12 +75,36 @@ public readonly struct ForwardOpenRequest
     /// Parse a Forward Open or Large Forward Open request from the service request data.
     /// Throws ArgumentException if the data is too short.
     /// </summary>
+    /// <remarks>
+    /// Prefer <see cref="TryParse(ReadOnlySpan{byte}, bool, out ForwardOpenRequest)"/>
+    /// on the request path — a truncated payload used to raise ArgumentException
+    /// out of here, which unwound through Dispatch into TcpSocketConnection.ReadLoop
+    /// and was swallowed with no CIP error reply, stalling the client.
+    /// </remarks>
     public static ForwardOpenRequest Parse(ReadOnlySpan<byte> data, bool isLarge = false)
     {
-        int minSize = isLarge ? MinLargeForwardOpenSize : MinForwardOpenSize;
-        if (data.Length < minSize)
+        if (!TryParse(data, isLarge, out var result))
+        {
+            int minSize = isLarge ? MinLargeForwardOpenSize : MinForwardOpenSize;
             throw new ArgumentException(
                 $"Forward Open requires at least {minSize} bytes, got {data.Length}");
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Non-throwing variant used by the dispatcher. Returns false when the body
+    /// is shorter than the fixed header or when the declared connection path
+    /// runs past the end of the buffer; the caller is expected to reply with
+    /// CIP 0x13 Not Enough Data in that case.
+    /// </summary>
+    public static bool TryParse(ReadOnlySpan<byte> data, bool isLarge, out ForwardOpenRequest result)
+    {
+        result = default;
+
+        int minSize = isLarge ? MinLargeForwardOpenSize : MinForwardOpenSize;
+        if (data.Length < minSize)
+            return false;
 
         int offset = 0;
 
@@ -125,12 +149,11 @@ public readonly struct ForwardOpenRequest
         int pathBytes = pathSize * 2;
 
         if (offset + pathBytes > data.Length)
-            throw new ArgumentException(
-                $"Connection path requires {pathBytes} bytes at offset {offset}, but data has {data.Length}");
+            return false;
 
         var path = data.Slice(offset, pathBytes).ToArray();
 
-        return new ForwardOpenRequest
+        result = new ForwardOpenRequest
         {
             PriorityTimeTick = priorityTimeTick,
             TimeoutTicks = timeoutTicks,
@@ -150,6 +173,7 @@ public readonly struct ForwardOpenRequest
             IsLargeForwardOpen = isLarge,
             RawServiceData = data.Slice(0, offset + pathBytes).ToArray(),
         };
+        return true;
     }
 }
 

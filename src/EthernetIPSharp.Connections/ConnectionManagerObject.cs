@@ -114,7 +114,12 @@ public sealed class ConnectionManagerObject
     /// </summary>
     private CipServiceResponse ProcessForwardOpen(CipServiceRequest request, bool isLarge)
     {
-        var fwdOpen = ForwardOpenRequest.Parse(request.Data.Span, isLarge);
+        // Short/truncated bodies used to raise ArgumentException out of Parse,
+        // which unwound through Dispatch into TcpSocketConnection.ReadLoop and
+        // was swallowed with no CIP reply, stalling the client. Use TryParse
+        // and reply with 0x13 Not Enough Data instead.
+        if (!ForwardOpenRequest.TryParse(request.Data.Span, isLarge, out var fwdOpen))
+            return CipServiceResponse.Error(request.ServiceCode, CipStatus.Error(CipStatus.NotEnoughData));
 
         // Parse connection path to find assembly instances
         var pathResult = ConnectionPathParser.Parse(fwdOpen.ConnectionPath.Span, fwdOpen);
