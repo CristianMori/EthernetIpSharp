@@ -37,10 +37,26 @@ Adapter, scanner, CIP Safety, structures, and the tag server are in [Quick start
 
 ---
 
+## What's new in 1.2
+
+- **Fragmented Logix tag I/O is walker-aware.** `Read Tag Fragmented` (0x52) and
+  `Write Tag Fragmented` (0x53) now dispatch through the same member/element/BOOL-bit
+  path walker as the non-fragmented services, so nested UDT member paths like
+  `Program:MainProgram.motor.counts[5]` land on the right bytes with the right type
+  code even when the payload is chunked.
+- **Full atomic type family exposed.** `LogixDataTypes` covers every CIP Vol 1 §C-6.1
+  elementary type — BOOL, SINT/INT/DINT/LINT, USINT/UINT/UDINT/ULINT, REAL/LREAL,
+  and BYTE/WORD/DWORD/LWORD — plus SHORT_STRING for Identity-style attributes.
+- **Comprehensive test suite — 301 passing.** 15 Cip + 185 Logix + 50 Safety +
+  48 Protocol. Run with `dotnet test EthernetIPSharp.slnx`.
+
+---
+
 ## Table of contents
 
 - [Install](#install)
 - [30-second quickstart](#30-second-quickstart)
+- [What's new in 1.2](#whats-new-in-12)
 - [Features](#features)
 - [Architecture](#architecture)
 - [Project layout](#project-layout)
