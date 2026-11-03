@@ -127,10 +127,17 @@ public sealed class SafetyScannerConnection : IAsyncDisposable
     // Target CID seeds — for decoding TCOO they send on server connection
     // (not needed — we just set consumerActive when we receive anything on server T→O)
 
-    // Mode byte state
-    private bool _runIdle;
+    // Mode byte state.
+    //
+    // _runIdle and _consumerActive are written on the UDP dispatch thread
+    // (OnServerTcooReceived) and read on the production thread
+    // (ProduceServerData). Mark them volatile for a straight acquire/release
+    // view: the production thread uses _consumerActive as its acquire fence,
+    // then does a Volatile.Read on _productionStartTicks to see the writer's
+    // Stopwatch anchor latched before the flag flipped.
+    private volatile bool _runIdle;
     private byte _pingCount;
-    private bool _consumerActive;
+    private volatile bool _consumerActive;
     private ushort _timestamp;
     // Our producer's rollover (used by Encode on server O->T). Seeded from
     // serverConfig.InitialRolloverValue at Open, recomputed in ProduceServerData
@@ -170,7 +177,15 @@ public sealed class SafetyScannerConnection : IAsyncDisposable
     public event Action<string>? Log;
 
     /// <summary>True if the connection is open and active.</summary>
-    public bool IsOpen { get; private set; }
+    public bool IsOpen
+    {
+        get => _isOpen;
+        private set => _isOpen = value;
+    }
+    // Read on the production thread (ProduceServerData) and the UDP dispatch
+    // thread (OnUdpMessageReceived); flipped on the TCP thread (OpenAsync /
+    // CloseAsync). Volatile to keep the straight acquire/release view.
+    private volatile bool _isOpen;
 
     private SafetyScannerConnection(EipScanner scanner, IEipUdpTransport udp, SafetyFormat format)
     {
@@ -394,9 +409,20 @@ public sealed class SafetyScannerConnection : IAsyncDisposable
     }
 
     /// <summary>Set the output data to send to the target.</summary>
+    /// <remarks>
+    /// Copy-on-swap: build a fresh byte[] and publish it with a single
+    /// <see cref="Volatile.Write"/>. The production thread reads the field
+    /// with <see cref="Volatile.Read"/>, so a caller flipping bytes while the
+    /// producer is encoding a frame can never tear a multi-byte payload — the
+    /// producer sees either the old buffer in full or the new one in full.
+    /// </remarks>
     public void SetOutputData(ReadOnlySpan<byte> data)
     {
-        data.CopyTo(_outputData);
+        var current = Volatile.Read(ref _outputData);
+        var next = new byte[current.Length];
+        int copyLen = Math.Min(data.Length, next.Length);
+        data.Slice(0, copyLen).CopyTo(next);
+        Volatile.Write(ref _outputData, next);
     }
 
     /// <summary>Produce safety-framed data on the server O→T connection.</summary>
@@ -406,7 +432,12 @@ public sealed class SafetyScannerConnection : IAsyncDisposable
 
         try
         {
-            bool runIdle = _consumerActive && _runIdle;
+            // Read _consumerActive FIRST — it acts as the acquire fence that
+            // pairs with the volatile write in OnServerTcooReceived. The
+            // Volatile.Read on _productionStartTicks below then sees the
+            // Stopwatch anchor the writer latched BEFORE flipping the flag.
+            bool consumerActive = _consumerActive;
+            bool runIdle = consumerActive && _runIdle;
             // Derive (timestamp, rollover) from the Stopwatch — mirrors the
             // target-side producer in SafetyDevice.ProduceIoData. The two
             // move together atomically because they both come from the same
@@ -416,10 +447,11 @@ public sealed class SafetyScannerConnection : IAsyncDisposable
             // ticks per frame) that was only correct at a 50 ms RPI — any
             // other negotiated RPI drifted the wire clock.
             ushort timestamp;
-            if (_consumerActive)
+            if (consumerActive)
             {
                 long nowTicks = Stopwatch.GetTimestamp();
-                long elapsedUs = (nowTicks - _productionStartTicks)
+                long startTicks = Volatile.Read(ref _productionStartTicks);
+                long elapsedUs = (nowTicks - startTicks)
                     * 1_000_000 / Stopwatch.Frequency;
                 long rawTicks = _initialTimestamp + elapsedUs / 128;
                 timestamp = (ushort)(rawTicks & 0xFFFF);
@@ -433,8 +465,12 @@ public sealed class SafetyScannerConnection : IAsyncDisposable
             ushort rollover = _rolloverCount;
             var mode = ModeByte.Create(runIdle, _pingCount);
 
-            var buf = new byte[_outputData.Length * 2 + 16];
-            int len = SafetyFrameCodec.Encode(buf, _outputData, _format, mode, timestamp,
+            // Copy-on-swap snapshot of the output buffer — SetOutputData
+            // publishes a new array under Volatile.Write, so this read either
+            // sees the old payload or the new one, never a torn mix of both.
+            var outputSnapshot = Volatile.Read(ref _outputData);
+            var buf = new byte[outputSnapshot.Length * 2 + 16];
+            int len = SafetyFrameCodec.Encode(buf, outputSnapshot, _format, mode, timestamp,
                 _pidSeedS1, _pidSeedS3, _pidSeedS5, rollover);
 
             _udp.SendIoData(_serverTargetEndpoint, _serverOtoTId, _serverEncapSeq, buf.AsSpan(0, len));
@@ -475,13 +511,14 @@ public sealed class SafetyScannerConnection : IAsyncDisposable
     {
         if (!_consumerActive)
         {
-            // Latch the Stopwatch anchor BEFORE flipping _consumerActive —
-            // ProduceServerData reads _productionStartTicks the moment it
-            // sees the flag flip, and the first consumer-active frame must
-            // measure elapsed from this instant so its wire timestamp lands
-            // on our advertised InitialTimestamp.
-            _productionStartTicks = Stopwatch.GetTimestamp();
-            _consumerActive = true;
+            // Latch the Stopwatch anchor via Volatile.Write BEFORE flipping
+            // _consumerActive. ProduceServerData reads _consumerActive first
+            // (its acquire fence) and only then Volatile.Read's
+            // _productionStartTicks, so the first consumer-active frame
+            // measures elapsed from this exact instant and its wire
+            // timestamp lands on our advertised InitialTimestamp.
+            Volatile.Write(ref _productionStartTicks, Stopwatch.GetTimestamp());
+            _consumerActive = true; // volatile field — release fence
             _runIdle = true;
             LogMsg($"Consumer active! Transitioning to run=1. TCOO: [{data.Span.ToArray().Select(b => b.ToString("X2")).Aggregate((a,b) => a + " " + b)}]");
         }
