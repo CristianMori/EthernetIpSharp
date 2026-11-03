@@ -8,6 +8,18 @@ using EthernetIPSharp.Protocol.Messages;
 namespace EthernetIPSharp.Safety;
 
 /// <summary>
+/// Raised when a safety-connection peer sends a Forward Open response or an
+/// I/O frame that violates the CIP Safety wire format (truncated app reply,
+/// bad CRC-S5, …). <see cref="SafetyScannerConnection.OpenAsync"/> surfaces
+/// it to the caller instead of letting it kill the task.
+/// </summary>
+public sealed class SafetyProtocolException : Exception
+{
+    public SafetyProtocolException(string message) : base(message) { }
+    public SafetyProtocolException(string message, Exception inner) : base(message, inner) { }
+}
+
+/// <summary>
 /// Parsed safety application reply from a Forward Open response.
 /// </summary>
 public readonly struct SafetyAppReply
@@ -19,9 +31,27 @@ public readonly struct SafetyAppReply
     public ushort InitialTimestamp { get; init; }
     public ushort InitialRolloverValue { get; init; }
 
-    public static SafetyAppReply Parse(ReadOnlySpan<byte> data)
+    /// <summary>
+    /// Minimum app-reply length for the base fields (ConsumerNumber,
+    /// TargetVendorId, TargetDeviceSerial, TargetConnectionSerial).
+    /// </summary>
+    public const int MinSize = 10;
+
+    /// <summary>
+    /// Non-throwing variant used by OpenAsync. Returns <c>false</c> when the
+    /// buffer cannot cover the base fields — a hostile target that returned
+    /// e.g. <c>appReplySize = 4</c> (8 bytes) would otherwise pass the
+    /// caller's outer length check and then throw out of <see cref="Parse"/>
+    /// mid-FwdOpen handling. Mirrors the SafetyNetworkSegment.TryParse
+    /// pattern added in commit 97fd90c.
+    /// </summary>
+    public static bool TryParse(ReadOnlySpan<byte> data, out SafetyAppReply result)
     {
-        var result = new SafetyAppReply
+        result = default;
+        if (data.Length < MinSize)
+            return false;
+
+        result = new SafetyAppReply
         {
             ConsumerNumber = BinaryPrimitives.ReadUInt16LittleEndian(data),
             TargetVendorId = BinaryPrimitives.ReadUInt16LittleEndian(data.Slice(2)),
@@ -30,12 +60,22 @@ public readonly struct SafetyAppReply
         };
         if (data.Length >= 14)
         {
-            return result with
+            result = result with
             {
                 InitialTimestamp = BinaryPrimitives.ReadUInt16LittleEndian(data.Slice(10)),
                 InitialRolloverValue = BinaryPrimitives.ReadUInt16LittleEndian(data.Slice(12)),
             };
         }
+        return true;
+    }
+
+    /// <summary>
+    /// Throwing variant. Prefer <see cref="TryParse"/> on the wire path.
+    /// </summary>
+    public static SafetyAppReply Parse(ReadOnlySpan<byte> data)
+    {
+        if (!TryParse(data, out var result))
+            throw new ArgumentException($"Truncated safety app reply ({data.Length}B, need {MinSize})");
         return result;
     }
 }
@@ -203,7 +243,14 @@ public sealed class SafetyScannerConnection : IAsyncDisposable
         byte appReplySize = srd[24];
         if (appReplySize > 0 && srd.Length >= 26 + appReplySize * 2)
         {
-            conn._targetAppReply = SafetyAppReply.Parse(srd.AsSpan(26));
+            // The caller's length check uses the advertised appReplySize, but
+            // a hostile target can advertise a size too small for the base
+            // fields (e.g. 4 words → 8 bytes). TryParse rejects that cleanly
+            // via SafetyProtocolException instead of unwinding out of Parse.
+            if (!SafetyAppReply.TryParse(srd.AsSpan(26), out var reply))
+                throw new SafetyProtocolException(
+                    $"Server FwdOpen app reply truncated: appReplySize={appReplySize} words, need >= {SafetyAppReply.MinSize / 2}");
+            conn._targetAppReply = reply;
             conn.LogMsg($"  Target: Vendor=0x{conn._targetAppReply.TargetVendorId:X4} " +
                 $"Serial=0x{conn._targetAppReply.TargetDeviceSerial:X8} " +
                 $"SVInst={conn._targetAppReply.TargetConnectionSerial}");
@@ -262,7 +309,12 @@ public sealed class SafetyScannerConnection : IAsyncDisposable
         SafetyAppReply clientAppReply = default;
         byte clientAppReplySize = crdArr[24];
         if (clientAppReplySize > 0 && crdArr.Length >= 26 + clientAppReplySize * 2)
-            clientAppReply = SafetyAppReply.Parse(crdArr.AsSpan(26));
+        {
+            // Same TryParse guard as the server-side parse above.
+            if (!SafetyAppReply.TryParse(crdArr.AsSpan(26), out clientAppReply))
+                throw new SafetyProtocolException(
+                    $"Client FwdOpen app reply truncated: appReplySize={clientAppReplySize} words, need >= {SafetyAppReply.MinSize / 2}");
+        }
 
         conn.LogMsg($"  Client OT=0x{conn._clientOtoTId:X8} TO=0x{conn._clientTtoOId:X8} SVInst={clientAppReply.TargetConnectionSerial}");
 
