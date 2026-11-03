@@ -98,6 +98,51 @@ public class FragmentedElementOffsetTests
     }
 
     [Fact]
+    public void SymbolicNameBackCompat_FragmentedRead_HonorsElementIdOffset()
+    {
+        // Back-compat path: CipPath built with just SymbolicName + ElementId
+        // routes through LogixDispatcher.DispatchTagService (not SymbolObject
+        // class dispatch and not the walker). Round-N forwarded elementOffset
+        // to HandleReadTag / HandleWriteTag there but silently dropped it for
+        // the fragmented siblings. Confirm fragmented Read_Tag on MyArray[5]
+        // returns bytes from element 5, not element 0.
+        var db = new TagDatabase();
+        var tag = db.AddTag("counts", LogixDataTypes.DINT, elementCount: 10);
+        for (int i = 0; i < 10; i++) tag.Write(i * 4, 100 + i);
+
+        var logix = new LogixDispatcher(db);
+        var path = new CipPath { SymbolicName = "counts", ElementId = 5 };
+        var req = FragmentedReadBody(elementCount: 1, byteOffsetInElements: 0);
+
+        var resp = logix.Dispatch(TagServices.ReadTagFragmented, path, req);
+
+        Assert.True(resp.Status.IsSuccess, $"status=0x{resp.Status.GeneralStatus:X2}");
+        Assert.Equal(LogixDataTypes.DINT, BinaryPrimitives.ReadUInt16LittleEndian(resp.Data.Span));
+        Assert.Equal(105, BinaryPrimitives.ReadInt32LittleEndian(resp.Data.Span.Slice(2)));
+    }
+
+    [Fact]
+    public void SymbolicNameBackCompat_FragmentedWrite_HonorsElementIdOffset()
+    {
+        var db = new TagDatabase();
+        var tag = db.AddTag("counts", LogixDataTypes.DINT, elementCount: 10);
+
+        var logix = new LogixDispatcher(db);
+        var path = new CipPath { SymbolicName = "counts", ElementId = 7 };
+        var payload = new byte[4];
+        BinaryPrimitives.WriteInt32LittleEndian(payload, 9999);
+        var req = FragmentedWriteBody(LogixDataTypes.DINT, elementCount: 1,
+                                       byteOffsetInElements: 0, payload);
+
+        var resp = logix.Dispatch(TagServices.WriteTagFragmented, path, req);
+
+        Assert.True(resp.Status.IsSuccess, $"status=0x{resp.Status.GeneralStatus:X2}");
+        Assert.Equal(9999, tag.Read<int>(7 * 4));
+        Assert.Equal(0, tag.Read<int>(6 * 4));
+        Assert.Equal(0, tag.Read<int>(8 * 4));
+    }
+
+    [Fact]
     public void SymbolObject_FragmentedRead_AsymmetryParity_WithAtomicReadTag()
     {
         // Pin the fix by running the same element segment through both
