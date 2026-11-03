@@ -441,8 +441,16 @@ public static class TagServices
             return CipServiceResponse.Success(serviceCode, reply);
         }
 
-        int bytesToRead = elementCount * walked.ElementSize;
-        if (walked.Offset + bytesToRead > tag.DataSize)
+        // elementCount is UINT16 and walked.ElementSize is int — for a walker
+        // sitting on a nested UDT member whose element size is in the tens of
+        // thousands of bytes the product can overflow int and come back
+        // negative, defeating the bound check. Compute in long and reject
+        // anything that cannot fit in int, mirroring HandleWriteTagFragmentedAt.
+        long bytesToReadLong = (long)elementCount * walked.ElementSize;
+        if (bytesToReadLong < 0 || bytesToReadLong > int.MaxValue)
+            return CipServiceResponse.Error(serviceCode, CipStatus.Error(CipStatus.TooMuchData));
+        int bytesToRead = (int)bytesToReadLong;
+        if ((long)walked.Offset + bytesToRead > tag.DataSize)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2105));
 
         // A walker that ends on a nested struct member carries a non-null Template
@@ -509,11 +517,16 @@ public static class TagServices
             return CipServiceResponse.Success(serviceCode);
         }
 
-        int bytesToWrite = elementCount * walked.ElementSize;
+        // Widen before the bound check — see HandleReadTagAt / the walker-aware
+        // HandleWriteTagFragmentedAt for the overflow rationale.
+        long bytesToWriteLong = (long)elementCount * walked.ElementSize;
+        if (bytesToWriteLong < 0 || bytesToWriteLong > int.MaxValue)
+            return CipServiceResponse.Error(serviceCode, CipStatus.Error(CipStatus.TooMuchData));
+        int bytesToWrite = (int)bytesToWriteLong;
         if (data.Length < headerLen + bytesToWrite)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0x13));
 
-        if (walked.Offset + bytesToWrite > tag.DataSize)
+        if ((long)walked.Offset + bytesToWrite > tag.DataSize)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2105));
 
         tag.SetData(span.Slice(headerLen, bytesToWrite), walked.Offset);
@@ -574,7 +587,12 @@ public static class TagServices
         ushort elementCount = BinaryPrimitives.ReadUInt16LittleEndian(span);
         uint byteOffsetInMember = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(2));
 
-        int totalBytes = elementCount * walked.ElementSize;
+        // Widen before the bound check — see HandleReadTagAt /
+        // HandleWriteTagFragmentedAt for the overflow rationale.
+        long totalBytesLong = (long)elementCount * walked.ElementSize;
+        if (totalBytesLong < 0 || totalBytesLong > int.MaxValue)
+            return CipServiceResponse.Error(serviceCode, CipStatus.Error(CipStatus.TooMuchData));
+        int totalBytes = (int)totalBytesLong;
         if (byteOffsetInMember >= (uint)totalBytes)
             return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2105));
 
@@ -585,7 +603,10 @@ public static class TagServices
         int remaining = totalBytes - (int)byteOffsetInMember;
         int chunkSize = Math.Min(remaining, MaxReplyData - prefixLen);
         bool moreData = (int)byteOffsetInMember + chunkSize < totalBytes;
-        int absoluteOffset = walked.Offset + (int)byteOffsetInMember;
+        long absoluteOffsetLong = (long)walked.Offset + byteOffsetInMember;
+        if (absoluteOffsetLong < 0 || absoluteOffsetLong + chunkSize > tag.DataSize)
+            return CipServiceResponse.Error(serviceCode, CipStatus.Error(0xFF, 0x2105));
+        int absoluteOffset = (int)absoluteOffsetLong;
 
         return BuildReadResponseAtomicOrStruct(tag, serviceCode, absoluteOffset, chunkSize, isPartial: moreData, typeOrHandle, asStruct);
     }
