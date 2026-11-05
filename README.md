@@ -47,8 +47,8 @@ Adapter, scanner, CIP Safety, structures, and the tag server are in [Quick start
 - **Full atomic type family exposed.** `LogixDataTypes` covers every CIP Vol 1 §C-6.1
   elementary type — BOOL, SINT/INT/DINT/LINT, USINT/UINT/UDINT/ULINT, REAL/LREAL,
   and BYTE/WORD/DWORD/LWORD — plus SHORT_STRING for Identity-style attributes.
-- **Comprehensive test suite — 301 passing.** 15 Cip + 185 Logix + 50 Safety +
-  48 Protocol. Run with `dotnet test EthernetIPSharp.slnx`.
+- **Comprehensive test suite — 312 passing.** 18 Cip + 191 Logix + 54 Safety +
+  49 Protocol. Run with `dotnet test EthernetIPSharp.slnx`.
 
 ---
 
