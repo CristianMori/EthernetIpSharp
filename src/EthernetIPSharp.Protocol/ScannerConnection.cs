@@ -159,7 +159,14 @@ public sealed class ScannerConnection : IAsyncDisposable
         _productionTimer?.Dispose();
         _udp.MessageReceived -= OnUdpMessageReceived;
 
-        await _scanner.ForwardCloseAsync(ConnectionSerial, OriginatorVendor, OriginatorSerial, ct);
+        try
+        {
+            await _scanner.ForwardCloseAsync(ConnectionSerial, OriginatorVendor, OriginatorSerial, ct);
+        }
+        catch (TimeoutException)
+        {
+            // The request timeout already closed the TCP link; the connection is gone either way.
+        }
     }
 
     public ValueTask DisposeAsync()

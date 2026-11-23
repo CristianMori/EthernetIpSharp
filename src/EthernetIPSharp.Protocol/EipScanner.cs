@@ -18,6 +18,31 @@ public sealed class EipScanner : IAsyncDisposable
     private EipUdpTransport? _udp;
     private ushort _nextConnSerial = 1;
 
+    /// <summary>Default value of <see cref="RequestTimeout"/>.</summary>
+    public static readonly TimeSpan DefaultRequestTimeout = TimeSpan.FromSeconds(5);
+
+    private TimeSpan? _requestTimeout = DefaultRequestTimeout;
+
+    /// <summary>
+    /// Maximum time to wait for the reply to any encapsulation request
+    /// (RegisterSession, SendRRData, SendUnitData, Forward_Open, Forward_Close).
+    /// Default 5 s. <c>null</c> or <see cref="Timeout.InfiniteTimeSpan"/> disables
+    /// the timeout. On expiry the TCP connection is closed (the reply stream is
+    /// out of sync after a missed reply), the session is reset and a
+    /// <see cref="TimeoutException"/> is thrown. A caller token still surfaces
+    /// as <see cref="OperationCanceledException"/>.
+    /// </summary>
+    public TimeSpan? RequestTimeout
+    {
+        get => _requestTimeout;
+        set
+        {
+            if (value is { } v && v != Timeout.InfiniteTimeSpan && v <= TimeSpan.Zero)
+                throw new ArgumentOutOfRangeException(nameof(value), "Timeout must be positive or infinite.");
+            _requestTimeout = value is { } t && t == Timeout.InfiniteTimeSpan ? null : value;
+        }
+    }
+
     /// <summary>Session handle assigned by the target during RegisterSession.</summary>
     public uint SessionHandle { get; private set; }
 
@@ -430,7 +455,8 @@ public sealed class EipScanner : IAsyncDisposable
                 };
                 var buf = new byte[EncapsulationHeader.Size];
                 header.WriteTo(buf);
-                await _stream.WriteAsync(buf);
+                using var cts = new CancellationTokenSource(DefaultRequestTimeout);
+                await _stream.WriteAsync(buf, cts.Token);
             }
             catch { }
         }
@@ -462,41 +488,61 @@ public sealed class EipScanner : IAsyncDisposable
         await _sendLock.WaitAsync(ct);
         try
         {
-            var header = new EncapsulationHeader
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            if (_requestTimeout is { } timeout) linked.CancelAfter(timeout);
+            var token = linked.Token;
+            try
             {
-                Command = command,
-                Length = (ushort)payload.Length,
-                SessionHandle = SessionHandle,
-            };
+                var header = new EncapsulationHeader
+                {
+                    Command = command,
+                    Length = (ushort)payload.Length,
+                    SessionHandle = SessionHandle,
+                };
 
-            var buf = new byte[EncapsulationHeader.Size + payload.Length];
-            header.WriteTo(buf);
-            payload.CopyTo(buf.AsSpan(EncapsulationHeader.Size));
-            await _stream!.WriteAsync(buf, ct);
+                var buf = new byte[EncapsulationHeader.Size + payload.Length];
+                header.WriteTo(buf);
+                payload.CopyTo(buf.AsSpan(EncapsulationHeader.Size));
+                await _stream!.WriteAsync(buf, token);
 
-            // Read response header
-            var respHeaderBuf = new byte[EncapsulationHeader.Size];
-            await ReadExactAsync(_stream, respHeaderBuf, ct);
-            _lastResponseHeader = EncapsulationHeader.Parse(respHeaderBuf);
+                // Read response header
+                var respHeaderBuf = new byte[EncapsulationHeader.Size];
+                await ReadExactAsync(_stream, respHeaderBuf, token);
+                _lastResponseHeader = EncapsulationHeader.Parse(respHeaderBuf);
 
-            if (_lastResponseHeader.Status != EncapsulationStatus.Success)
-                throw new InvalidOperationException(
-                    $"Encapsulation error: command={command}, status={_lastResponseHeader.Status}");
+                if (_lastResponseHeader.Status != EncapsulationStatus.Success)
+                    throw new InvalidOperationException(
+                        $"Encapsulation error: command={command}, status={_lastResponseHeader.Status}");
 
-            // Read response payload
-            byte[] respPayload = [];
-            if (_lastResponseHeader.Length > 0)
-            {
-                respPayload = new byte[_lastResponseHeader.Length];
-                await ReadExactAsync(_stream, respPayload, ct);
+                // Read response payload
+                byte[] respPayload = [];
+                if (_lastResponseHeader.Length > 0)
+                {
+                    respPayload = new byte[_lastResponseHeader.Length];
+                    await ReadExactAsync(_stream, respPayload, token);
+                }
+
+                return respPayload;
             }
-
-            return respPayload;
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested && linked.IsCancellationRequested)
+            {
+                AbortOnTimeout();
+                throw new TimeoutException(
+                    $"No reply to {command} within {_requestTimeout!.Value.TotalMilliseconds:0} ms; connection closed.");
+            }
         }
         finally
         {
             _sendLock.Release();
         }
+    }
+
+    /// <summary>Drop the TCP connection and session after a missed reply.</summary>
+    private void AbortOnTimeout()
+    {
+        SessionHandle = 0;
+        try { _stream?.Dispose(); } catch { }
+        try { _client?.Dispose(); } catch { }
     }
 
     private static async Task ReadExactAsync(NetworkStream stream, byte[] buffer, CancellationToken ct)
