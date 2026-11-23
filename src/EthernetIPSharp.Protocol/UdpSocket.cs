@@ -8,13 +8,18 @@ namespace EthernetIPSharp.Protocol;
 /// <summary>
 /// Pure UDP socket abstraction. No protocol knowledge.
 ///
-/// Two threads:
-///   - RX thread:       ReceiveFrom into pooled buffer, enqueue, repeat
+/// Two loops:
+///   - RX loop:         async ReceiveFrom into pooled buffer, enqueue, repeat
 ///   - Dispatch thread: dequeue, fire PacketReceived, recycle buffer
 ///
 /// Decoupling receive from dispatch means a slow event handler never
 /// causes us to miss packets at the socket layer (up to the configured
 /// queue depth + OS socket buffer).
+///
+/// Stop is driven by the cancellation token, not by closing the socket:
+/// a blocking ReceiveFrom on an unconnected UDP socket is not woken by
+/// Dispose on every OS (macOS never wakes it), while an async receive
+/// honours the token everywhere.
 /// </summary>
 public sealed class UdpSocket : IAsyncDisposable
 {
@@ -22,18 +27,18 @@ public sealed class UdpSocket : IAsyncDisposable
     public event Action<ReadOnlyMemory<byte>, IPEndPoint>? PacketReceived;
 
     private UdpClient? _client;
-    private Thread? _rxThread;
+    private Task? _rxTask;
     private Thread? _dispatchThread;
     private CancellationTokenSource? _cts;
 
-    // SPSC handoff between RX thread (single producer) and dispatch thread
+    // SPSC handoff between RX loop (single producer) and dispatch thread
     // (single consumer). BlockingCollection wraps a ConcurrentQueue and gives
     // us a built-in blocking Take + cooperative shutdown via CompleteAdding.
     private readonly BlockingCollection<RxPacket> _queue = new(new ConcurrentQueue<RxPacket>());
 
     private readonly record struct RxPacket(byte[] Buffer, int Length, IPEndPoint RemoteEndpoint);
 
-    /// <summary>Bind the socket and start the RX + dispatch threads.</summary>
+    /// <summary>Bind the socket and start the RX + dispatch loops.</summary>
     public Task StartAsync(IPEndPoint bindEndpoint, CancellationToken ct)
     {
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -53,13 +58,7 @@ public sealed class UdpSocket : IAsyncDisposable
 
         _client.Client.Bind(bindEndpoint);
 
-        _rxThread = new Thread(RxLoop)
-        {
-            IsBackground = true,
-            Name = "UDP-Rx",
-            Priority = ThreadPriority.AboveNormal,
-        };
-        _rxThread.Start();
+        _rxTask = Task.Run(RxLoopAsync);
 
         _dispatchThread = new Thread(DispatchLoop)
         {
@@ -78,31 +77,40 @@ public sealed class UdpSocket : IAsyncDisposable
         _client?.Client.SendTo(data, SocketFlags.None, destination);
     }
 
-    private void RxLoop()
+    private async Task RxLoopAsync()
     {
         var ct = _cts!.Token;
         var sock = _client!.Client;
-        EndPoint remote = new IPEndPoint(IPAddress.Any, 0);
+        EndPoint any = new IPEndPoint(IPAddress.Any, 0);
 
         while (!ct.IsCancellationRequested)
         {
             byte[] buf = ArrayPool<byte>.Shared.Rent(2048);
             try
             {
-                int len = sock.ReceiveFrom(buf, ref remote);
-                if (len > 0)
+                var r = await sock.ReceiveFromAsync(buf.AsMemory(), SocketFlags.None, any, ct)
+                                  .ConfigureAwait(false);
+                if (r.ReceivedBytes > 0)
                 {
-                    // Copy endpoint — ReceiveFrom mutates the passed-in instance.
-                    var endpoint = new IPEndPoint(((IPEndPoint)remote).Address,
-                                                  ((IPEndPoint)remote).Port);
-                    _queue.Add(new RxPacket(buf, len, endpoint));
+                    // RemoteEndPoint is a fresh IPEndPoint per receive.
+                    _queue.Add(new RxPacket(buf, r.ReceivedBytes, (IPEndPoint)r.RemoteEndPoint));
                     continue; // ownership of buf transferred to dispatch thread
                 }
             }
             catch (OperationCanceledException) { ArrayPool<byte>.Shared.Return(buf); break; }
             catch (ObjectDisposedException) { ArrayPool<byte>.Shared.Return(buf); break; }
             catch (InvalidOperationException) { ArrayPool<byte>.Shared.Return(buf); break; } // _queue.CompleteAdding called
-            catch (SocketException) { /* transient */ }
+            catch (SocketException ex)
+            {
+                if (ct.IsCancellationRequested
+                    || ex.SocketErrorCode is SocketError.OperationAborted or SocketError.Interrupted
+                                           or SocketError.Shutdown or SocketError.NotSocket)
+                {
+                    ArrayPool<byte>.Shared.Return(buf);
+                    break;
+                }
+                /* otherwise transient */
+            }
 
             ArrayPool<byte>.Shared.Return(buf);
         }
@@ -123,18 +131,21 @@ public sealed class UdpSocket : IAsyncDisposable
         catch (OperationCanceledException) { /* cancellation requested */ }
     }
 
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         _cts?.Cancel();
         try { _queue.CompleteAdding(); } catch (ObjectDisposedException) { } // wake dispatch loop
 
-        // Wait briefly for the threads to exit before tearing down their state.
-        _rxThread?.Join(500);
-        _dispatchThread?.Join(500);
+        // Bounded wait for the loops to exit before tearing down their state.
+        // The receive loop ends as soon as the token fires; the socket is
+        // disposed only afterwards.
+        if (_rxTask is { } rx)
+            await Task.WhenAny(rx, Task.Delay(1000)).ConfigureAwait(false);
+        if (_dispatchThread is { } dt && dt != Thread.CurrentThread)
+            dt.Join(500);
 
         _client?.Dispose();
         _queue.Dispose();
         _cts?.Dispose();
-        return ValueTask.CompletedTask;
     }
 }
