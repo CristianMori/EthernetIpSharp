@@ -18,6 +18,7 @@
 
   <ItemGroup>
     <Using Include="Xunit" />
+    <Compile Include="../EthernetIPSharp.Protocol.Tests/SilentTargetServer.cs" Link="SilentTargetServer.cs" />
   </ItemGroup>
 
   <ItemGroup>
