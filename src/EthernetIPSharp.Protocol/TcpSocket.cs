@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 
@@ -12,6 +13,9 @@ namespace EthernetIPSharp.Protocol;
 /// and fires BytesReceived for each chunk. Consumers handle framing
 /// (accumulate into a buffer, parse messages with an IMessageManager).
 ///
+/// Live connections are tracked so that disposing the socket closes them
+/// and joins their read threads.
+///
 /// Mirrors UdpSocket's role: socket transport without any protocol logic.
 /// </summary>
 public sealed class TcpSocket : IAsyncDisposable
@@ -22,6 +26,7 @@ public sealed class TcpSocket : IAsyncDisposable
     private TcpListener? _listener;
     private CancellationTokenSource? _cts;
     private Thread? _acceptThread;
+    private readonly ConcurrentDictionary<TcpSocketConnection, byte> _connections = new();
 
     /// <summary>Bind + listen + start the accept thread.</summary>
     public Task StartAsync(IPEndPoint bindEndpoint, CancellationToken ct)
@@ -44,15 +49,31 @@ public sealed class TcpSocket : IAsyncDisposable
         var ct = _cts!.Token;
         while (!ct.IsCancellationRequested)
         {
-            try
-            {
-                var client = _listener!.AcceptTcpClient();
-                var conn = new TcpSocketConnection(client, _cts.Token);
-                ClientConnected?.Invoke(conn);
-                conn.Start();
-            }
+            TcpClient client;
+            try { client = _listener!.AcceptTcpClient(); }
             catch (ObjectDisposedException) { break; }
-            catch (SocketException) { /* listener was closed mid-accept */ break; }
+            // Listener stopped mid-accept (Interrupted / OperationAborted) or failed.
+            catch (SocketException) { break; }
+            catch (InvalidOperationException) { break; }
+
+            TcpSocketConnection conn;
+            try { conn = new TcpSocketConnection(client, ct); }
+            catch { try { client.Dispose(); } catch { } continue; }
+
+            conn.Ended = c => _connections.TryRemove(c, out _);
+            _connections[conn] = 0;
+
+            // Accepted just as disposal started (accept can return normally after Stop).
+            if (ct.IsCancellationRequested)
+            {
+                conn.Dispose();
+                _connections.TryRemove(conn, out _);
+                break;
+            }
+
+            try { ClientConnected?.Invoke(conn); }
+            catch { conn.Dispose(); _connections.TryRemove(conn, out _); continue; }
+            conn.Start();
         }
     }
 
@@ -60,7 +81,21 @@ public sealed class TcpSocket : IAsyncDisposable
     {
         _cts?.Cancel();
         try { _listener?.Stop(); } catch { }
-        _acceptThread?.Join(500);
+        if (_acceptThread is { } at && at != Thread.CurrentThread) at.Join(500);
+
+        // Close every live client (wakes their blocked reads), then join the
+        // read threads within one shared bounded wait.
+        var live = _connections.Keys.ToArray();
+        foreach (var c in live)
+            c.Dispose();
+        var deadline = Environment.TickCount64 + 1000;
+        foreach (var c in live)
+        {
+            var left = (int)Math.Max(0, deadline - Environment.TickCount64);
+            c.JoinReader(left);
+        }
+        _connections.Clear();
+
         _cts?.Dispose();
         return ValueTask.CompletedTask;
     }
@@ -85,7 +120,10 @@ public sealed class TcpSocketConnection : IDisposable
     private readonly NetworkStream _stream;
     private readonly CancellationToken _ct;
     private Thread? _readThread;
-    private bool _disposed;
+    private int _disposed;
+
+    /// <summary>Owner hook: called once when the read loop ends, so the owner can drop its reference.</summary>
+    internal Action<TcpSocketConnection>? Ended { get; set; }
 
     internal TcpSocketConnection(TcpClient client, CancellationToken ct)
     {
@@ -106,17 +144,24 @@ public sealed class TcpSocketConnection : IDisposable
         _readThread.Start();
     }
 
+    internal void JoinReader(int millisecondsTimeout)
+    {
+        var t = _readThread;
+        if (t != null && t != Thread.CurrentThread) t.Join(millisecondsTimeout);
+    }
+
     private void ReadLoop()
     {
         byte[] buf = ArrayPool<byte>.Shared.Rent(4096);
         try
         {
-            while (!_ct.IsCancellationRequested && !_disposed)
+            while (!_ct.IsCancellationRequested && Volatile.Read(ref _disposed) == 0)
             {
                 int n;
                 try { n = _stream.Read(buf, 0, buf.Length); }
                 catch (IOException) { break; }
                 catch (ObjectDisposedException) { break; }
+                catch (SocketException) { break; }
 
                 if (n == 0) break; // peer closed
                 try { BytesReceived?.Invoke(this, buf.AsMemory(0, n)); }
@@ -128,13 +173,14 @@ public sealed class TcpSocketConnection : IDisposable
             ArrayPool<byte>.Shared.Return(buf);
             try { Closed?.Invoke(this); } catch { }
             Dispose();
+            try { Ended?.Invoke(this); } catch { }
         }
     }
 
     /// <summary>Send bytes on this connection. Synchronous.</summary>
     public void Send(ReadOnlySpan<byte> data)
     {
-        if (_disposed) return;
+        if (Volatile.Read(ref _disposed) != 0) return;
         try { _stream.Write(data); }
         catch (IOException) { Dispose(); }
         catch (ObjectDisposedException) { Dispose(); }
@@ -142,8 +188,7 @@ public sealed class TcpSocketConnection : IDisposable
 
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         try { _stream.Dispose(); } catch { }
         try { _client.Dispose(); } catch { }
     }
