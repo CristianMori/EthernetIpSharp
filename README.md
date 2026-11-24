@@ -1,5 +1,6 @@
 # EthernetIPSharp
 
+[![CI](https://github.com/CristianMori/EthernetIpSharp/actions/workflows/ci.yml/badge.svg)](https://github.com/CristianMori/EthernetIpSharp/actions/workflows/ci.yml)
 [![NuGet](https://img.shields.io/nuget/v/EthernetIPSharp)](https://www.nuget.org/packages/EthernetIPSharp)
 [![Downloads](https://img.shields.io/nuget/dt/EthernetIPSharp)](https://www.nuget.org/packages/EthernetIPSharp)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
