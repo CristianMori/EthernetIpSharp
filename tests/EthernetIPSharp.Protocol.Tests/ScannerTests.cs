@@ -158,8 +158,15 @@ public class ScannerTests : IAsyncLifetime
         conn.Write(0, 12345);
         conn.Write(4, 67890);
 
-        // Wait for target to receive it
-        await Task.Delay(200);
+        // Poll (bounded) until both directions have exchanged data; a fixed
+        // delay is too short on slow shared CI runners.
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (DateTime.UtcNow < deadline
+               && !(_device.Assemblies.GetAssembly(101)!.Read<int>(0) == 12345
+                    && _device.Assemblies.GetAssembly(101)!.Read<int>(4) == 67890
+                    && conn.Read<int>(0) == unchecked((int)0xDEADBEEF)
+                    && conn.Read<int>(4) == 42))
+            await Task.Delay(20);
 
         // Check target received the O→T data
         var consumed = _device.Assemblies.GetAssembly(101)!;
