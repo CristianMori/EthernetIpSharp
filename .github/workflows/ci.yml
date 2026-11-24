@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  build-test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Libraries, samples and tests target net8.0, so the 8.0 runtime is needed
+      # to run the tests. The solution is a .slnx and tests/CipMessageSniffer
+      # targets net10.0, so the 10.0 SDK is needed to build it. With both
+      # installed the newest SDK drives the build.
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Restore
+        run: dotnet restore EthernetIPSharp.slnx
+
+      - name: Build
+        run: dotnet build EthernetIPSharp.slnx -c Release --no-restore
+
+      # --blame-hang kills the test host and fails the run if one test stalls
+      # (e.g. a socket that never completes) instead of waiting for the job
+      # timeout.
+      - name: Test
+        run: >
+          dotnet test EthernetIPSharp.slnx -c Release --no-build
+          --blame-hang --blame-hang-timeout 5m
