@@ -82,6 +82,26 @@ public sealed class TagClient : IAsyncDisposable
         }
     }
 
+    /// <summary>Default value of <see cref="ConnectTimeout"/>.</summary>
+    public static readonly TimeSpan DefaultConnectTimeout = TcpConnectHelper.DefaultConnectTimeout;
+
+    private TimeSpan? _connectTimeout = DefaultConnectTimeout;
+
+    /// <summary>
+    /// Maximum time to wait for the TCP connection to be established.
+    /// Default 5 s. <c>null</c> or <see cref="Timeout.InfiniteTimeSpan"/> disables
+    /// the timeout (the OS connect timeout then applies). On expiry the connect
+    /// attempt is aborted, the socket is disposed, the client stays not connected
+    /// and a <see cref="TimeoutException"/> is thrown. A caller token still
+    /// surfaces as <see cref="OperationCanceledException"/>; refused or
+    /// unreachable targets still fail fast with <see cref="System.Net.Sockets.SocketException"/>.
+    /// </summary>
+    public TimeSpan? ConnectTimeout
+    {
+        get => _connectTimeout;
+        set => _connectTimeout = TcpConnectHelper.Normalize(value);
+    }
+
     /// <summary>Session handle assigned by the target.</summary>
     public uint SessionHandle { get; private set; }
 
@@ -153,8 +173,10 @@ public sealed class TagClient : IAsyncDisposable
     /// connection to the destination's Message Router.</summary>
     public async Task ConnectAsync(CancellationToken ct = default)
     {
-        _client = new TcpClient();
-        await _client.ConnectAsync(_host, _port, ct);
+        var client = new TcpClient();
+        await TcpConnectHelper.ConnectAsync(client, c => client.ConnectAsync(_host, _port, c),
+            _host, _port, _connectTimeout, ct);
+        _client = client;
         _stream = _client.GetStream();
         SessionHandle = await RegisterSessionAsync(ct);
         if (_useConnected)

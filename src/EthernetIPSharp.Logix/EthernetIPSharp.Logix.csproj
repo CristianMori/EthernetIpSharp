@@ -12,4 +12,8 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="EthernetIPSharp.Logix.Tests" />
+  </ItemGroup>
+
 </Project>
