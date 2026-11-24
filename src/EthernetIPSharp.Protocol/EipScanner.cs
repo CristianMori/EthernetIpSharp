@@ -43,6 +43,26 @@ public sealed class EipScanner : IAsyncDisposable
         }
     }
 
+    /// <summary>Default value of <see cref="ConnectTimeout"/>.</summary>
+    public static readonly TimeSpan DefaultConnectTimeout = TcpConnectHelper.DefaultConnectTimeout;
+
+    private TimeSpan? _connectTimeout = DefaultConnectTimeout;
+
+    /// <summary>
+    /// Maximum time to wait for the TCP connection to be established.
+    /// Default 5 s. <c>null</c> or <see cref="Timeout.InfiniteTimeSpan"/> disables
+    /// the timeout (the OS connect timeout then applies). On expiry the connect
+    /// attempt is aborted, the socket is disposed, the client stays not connected
+    /// and a <see cref="TimeoutException"/> is thrown. A caller token still
+    /// surfaces as <see cref="OperationCanceledException"/>; refused or
+    /// unreachable targets still fail fast with <see cref="System.Net.Sockets.SocketException"/>.
+    /// </summary>
+    public TimeSpan? ConnectTimeout
+    {
+        get => _connectTimeout;
+        set => _connectTimeout = TcpConnectHelper.Normalize(value);
+    }
+
     /// <summary>Session handle assigned by the target during RegisterSession.</summary>
     public uint SessionHandle { get; private set; }
 
@@ -58,8 +78,10 @@ public sealed class EipScanner : IAsyncDisposable
     /// <summary>Connect to a target device by IP address and register a session.</summary>
     public async Task ConnectAsync(IPAddress address, int port = EipAdapter.DefaultPort, CancellationToken ct = default)
     {
-        _client = new TcpClient();
-        await _client.ConnectAsync(address, port, ct);
+        var client = new TcpClient();
+        await TcpConnectHelper.ConnectAsync(client, c => client.ConnectAsync(address, port, c),
+            address.ToString(), port, _connectTimeout, ct);
+        _client = client;
         _stream = _client.GetStream();
         LocalEndpoint = (IPEndPoint)_client.Client.LocalEndPoint!;
         RemoteEndpoint = (IPEndPoint)_client.Client.RemoteEndPoint!;
