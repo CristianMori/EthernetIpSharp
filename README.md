@@ -386,6 +386,29 @@ for (int i = 0; i < 10_000; i++)
     await client.ReadAsync<int>("rate");
 ```
 
+### Client timeouts
+
+`EipScanner` and `TagClient` bound both the TCP connect and every request:
+
+| Property | Default | Bounds |
+|---|---|---|
+| `ConnectTimeout` | 5 s | Establishing the TCP connection. On expiry the attempt is aborted, the socket is disposed, the client stays not connected and `TimeoutException` is thrown (message names host:port and the duration). |
+| `RequestTimeout` | 5 s | The reply to each encapsulation request (RegisterSession, SendRRData, SendUnitData, Forward_Open, Forward_Close). On expiry the connection is closed, the session is reset and `TimeoutException` is thrown. |
+
+Set either to `null` or `Timeout.InfiniteTimeSpan` to disable it (the OS
+connect timeout then applies). A cancelled caller token still surfaces as
+`OperationCanceledException`, and refused or unreachable targets still fail
+with `SocketException` as before.
+
+```csharp
+await using var client = new TagClient("192.168.1.96")
+{
+    ConnectTimeout = TimeSpan.FromSeconds(2),
+    RequestTimeout = TimeSpan.FromSeconds(10),
+};
+await client.ConnectAsync();
+```
+
 ### Logix tag server
 
 ```csharp
