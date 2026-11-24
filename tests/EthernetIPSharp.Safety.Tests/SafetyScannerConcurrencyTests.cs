@@ -60,7 +60,12 @@ public class SafetyScannerConcurrencyTests
         var fld = typeof(SafetyScannerConnection).GetField(
             "_outputData", BindingFlags.NonPublic | BindingFlags.Instance);
         Assert.NotNull(fld);
-        fld!.SetValue(conn, new byte[outputSize]);
+        // Initial content must satisfy the byte[i] = seed + i invariant the
+        // tear test checks (seed 0), otherwise a reader that wins the race
+        // against the first SetOutputData sees an "invalid" all-zero buffer.
+        var initial = new byte[outputSize];
+        for (int i = 0; i < initial.Length; i++) initial[i] = (byte)i;
+        fld!.SetValue(conn, initial);
         return conn;
     }
 
